@@ -17,6 +17,12 @@ __pycache__/
 # Claude
 .claude/
 
+# Cursor
+.cursor/
+
+# github
+.github/
+
 # Distribution / packaging
 .Python
 build/
