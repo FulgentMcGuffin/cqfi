@@ -149,6 +149,48 @@ def test_resolve_trade_dates_rejects_end_before_start(settings: AppSettings):
         resolve_trade_dates(ISSUERS["FRA"], date(2020, 2, 1), date(2020, 1, 1), settings)
 
 
+@pytest.fixture
+def ycs_db_with_holidays(tmp_path: Path) -> Path:
+    """YCS database with holidays included to test filtering."""
+    db_path = tmp_path / "ycs_data_holidays.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE zero_rates (source TEXT, date TEXT, Y010p0 REAL)")
+        # Include holidays: 2020-01-01 (New Year's Day) and 2020-12-25 (Christmas)
+        for d in ("2020-01-01", "2020-01-02", "2020-01-03", "2020-12-25", "2020-12-28"):
+            conn.execute("INSERT INTO zero_rates VALUES ('USA', ?, 0.5)", (d,))
+        conn.commit()
+    return db_path
+
+
+def test_resolve_trade_dates_filters_out_holidays(
+    bond_analytics_db: Path, ycs_db_with_holidays: Path, tmp_path: Path
+):
+    """Verify that holidays (Jan 1, etc.) are filtered out even if in database."""
+    settings = AppSettings(
+        config_path=tmp_path / "cqfi.yaml",
+        ycs_db_path=ycs_db_with_holidays,
+        ycs_semantics_dir=tmp_path,
+        bond_analytics_db_path=bond_analytics_db,
+        bond_analytics_semantics_dir=Path("semantics"),
+        bond_analytics_semantics_path=Path("semantics/bond_analytics.yaml"),
+        quant_cache_db_path=tmp_path / "quant_cache.sqlite",
+        quant_cache_semantics_dir=Path("semantics"),
+        quant_cache_semantics_path=Path("semantics/quant_cache.yaml"),
+        sessions_dir=tmp_path / "sessions",
+        mcp_datasets={},
+    )
+
+    # Verify that holidays are filtered out
+    dates = resolve_trade_dates(ISSUERS["USA"], date(2020, 1, 1), date(2020, 12, 31), settings)
+    # Should exclude Jan 1 (Wednesday holiday) and Dec 25 (Friday holiday)
+    # Jan 2 is Thursday, Jan 3 is Friday, Dec 28 is Monday (all business days)
+    assert date(2020, 1, 1) not in dates  # New Year's Day
+    assert date(2020, 12, 25) not in dates  # Christmas
+    assert date(2020, 1, 2) in dates  # Thursday (business day)
+    assert date(2020, 1, 3) in dates  # Friday (business day)
+    assert date(2020, 12, 28) in dates  # Monday (business day)
+
+
 def test_build_issuer_plan_excludes_unissued_and_matured_bonds(settings: AppSettings):
     plan = build_issuer_plan(ISSUERS["FRA"], date(2020, 1, 1), date(2020, 1, 31), settings)
 

@@ -13,6 +13,7 @@ from datetime import date
 from cqfi.bond_manager import BondManager
 from cqfi.config import AppSettings
 from cqfi.data.rates_loader import list_available_dates
+from cqfi.date_utils import to_ql_date
 from cqfi.instruments import Bond
 from cqfi.issuers import IssuerProfile, RateType, resolve_issuer
 
@@ -45,14 +46,25 @@ def resolve_trade_dates(
     settings: AppSettings,
     rate_type: RateType = RateType.ZERO,
 ) -> list[date]:
-    """Dates with curve data for *issuer* inside ``[start, end]``, ascending."""
+    """Dates with curve data for *issuer* inside ``[start, end]``, ascending.
+
+    Filters to business days only, excluding holidays per the issuer's calendar.
+    """
     if end < start:
         raise ValueError(f"end date {end} is before start date {start}")
     frame = list_available_dates(settings.ycs_db_path, issuer, rate_type=rate_type)
     if frame.is_empty():
         return []
+
+    calendar = issuer.calendar()
     all_dates = (date.fromisoformat(str(value)[:10]) for value in frame["date"].to_list())
-    return sorted(d for d in all_dates if start <= d <= end)
+
+    # Filter to business days only
+    business_dates = (
+        d for d in all_dates
+        if start <= d <= end and calendar.isBusinessDay(to_ql_date(d))
+    )
+    return sorted(business_dates)
 
 
 @dataclass(frozen=True)
