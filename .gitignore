@@ -11,8 +11,20 @@ __pycache__/
 # C extensions
 *.so
 
-# Mex
+# Mex - unvibe
 .mex/
+shipread_results/
+shipread_results/**
+shipread_results/*
+shipread_results/*/*
+shipread_results/*/*/*
+shipread_results/*/*/*/*
+shipread_results/*/*/*/*/*
+shipread_results/*/*/*/*/*/*
+shipread_results/*/*/*/*/*/*/*
+shipread_results/*/*/*/*/*/*/*/*
+shipread_results/*/*/*/*/*/*/*/*/*
+
 
 # Claude
 .claude/
