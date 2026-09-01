@@ -13,17 +13,9 @@ __pycache__/
 
 # Mex - unvibe
 .mex/
-shipread_results/
-shipread_results/**
-shipread_results/*
-shipread_results/*/*
-shipread_results/*/*/*
-shipread_results/*/*/*/*
-shipread_results/*/*/*/*/*
-shipread_results/*/*/*/*/*/*
-shipread_results/*/*/*/*/*/*/*
-shipread_results/*/*/*/*/*/*/*/*
-shipread_results/*/*/*/*/*/*/*/*/*
+shipready_results/
+shipready_results/**
+shipready_results/*
 
 
 # Claude
