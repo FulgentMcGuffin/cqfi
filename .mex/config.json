@@ -1,0 +1,11 @@
+{
+  "setupMode": "code-repo",
+  "aiTools": [
+    "claude",
+    "cursor"
+  ],
+  "scaffold_id": "ded811a1-9b8e-4a4f-904f-02a9fab55e84",
+  "scaffold_name": "cqfi",
+  "origin": null,
+  "upstream": null
+}

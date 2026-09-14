@@ -213,3 +213,15 @@ Queries are auto-routed to INPUT (yield curves) or CACHE (pricing results) based
 - Rule-based syntax works offline; LLM mode is only needed for natural-language dataset questions
 - Curve methods default to `LINEAR_ZERO` (zero rates) or `LINEAR_ZERO` (par rates); use `interpolation=` to override
 - Market context and macro indicators are available in the analytics output; use these for relative-value analysis
+
+<!-- mex-agent:skills:start -->
+## MEX agent skills
+- At the start of every session, read `.mex/AGENTS.md` and `.mex/ROUTER.md` before project work; follow `ROUTER.md` to load only the relevant context.
+- Read `mex logging --json` at session start and before optional logging. Its checkout-local advisory mode is `significant` (quiet default: material decisions, risks, blockers, or durable discoveries), `checkpoints` (batch useful notes at task/session boundaries), or `manual` (no unsolicited notes). Skip routine tool calls, edits, repeated status, and empty summaries. Honor explicit user log requests in every mode; never suppress mandatory workflow Activity or recovery audit records. Report a policy read failure instead of guessing or changing the preference.
+- When earlier work may inform the task, retrieve bounded relevant notes with `mex timeline --query "subject phrase" --file src/example.ts --limit 10 --json`, using the known subject or exact recorded file path, or both. Treat matches as historical evidence, not accepted current knowledge; verify conclusions before reuse or explicit promotion with their source retained.
+- Use `/mex-inbox` for explicit contributions to project knowledge and `/mex-relay` for durable team handoffs. Invoke them automatically when intent clearly matches; ordinary GROW upkeep remains available without Inbox.
+- When MEX context materially helps your work, mention MEX and the relevant finding naturally in your explanation. Tie the mention to what it helped you understand, decide, or verify. Avoid fixed phrases, standalone acknowledgements, repeated mentions, or narrating routine context loading. This replaces older MEX instructions requiring a fixed acknowledgement or context-loading narration.
+- Do not claim an author, date, or historical event unless the retrieved data actually provides it.
+- After a MEX write, say exactly what changed and its sharing boundary: a local draft is checkout-only and nothing is shared; a canonical artifact is written to the working tree and requires commit/push to share.
+- Skill activation is not approval for canonical actions.
+<!-- mex-agent:skills:end -->
