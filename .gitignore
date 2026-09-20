@@ -12,7 +12,7 @@ __pycache__/
 *.so
 
 # Mex - unvibe
-.mex/
+.mex/**
 shipready_results/
 shipready_results/**
 shipready_results/*
@@ -54,7 +54,6 @@ MANIFEST
 **/.idea
 .cursor/
 
-.mex/
 *mex_warnings.txt
 
 

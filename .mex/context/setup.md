@@ -38,8 +38,7 @@ last_updated: 2026-09-14
 
 1. Clone repo and enter directory: `cd D:\Code\cqfi`
 2. Sync environment: `uv sync` (installs all dependencies including QuantLib)
-3. Copy config template: `copy config/cqfi.yaml.example config/cqfi.yaml` (optional, defaults exist)
-4. Copy `.env` for LLM mode: `copy .env.example .env` and set `ANTHROPIC_API_KEY` (optional, CLI works offline without it)
+3. Copy `.env` for LLM mode: `copy .env.example .env` and set `ANTHROPIC_API_KEY` (optional, CLI works offline without it)
 5. Verify setup: `uv run pytest tests/test_cmt.py -v` (runs a quick smoke test)
 6. Launch CLI: `uv run cqfi` or GUI: `uv run cqfi-gui`
 
@@ -73,10 +72,15 @@ last_updated: 2026-09-14
 
 **QuantLib import fails on Windows:** Pre-built wheels are required. If `import ql` fails, verify QuantLib is installed via `pip show QuantLib`. If missing, try `uv sync --force-reinstall`.
 
-**Config file not found:** Set `CQFI_CONFIG` to the full path, or ensure `config/cqfi.yaml` exists. Check `config/cqfi.yaml.example` for the format.
+**Config file not found:** Set `CQFI_CONFIG` to the full path, or ensure `config/cqfi.yaml` exists. See CLAUDE.md for config format and options.
 
 **`ycs_data.duckdb` not found:** Update the `paths.ycs_db` entry in `config/cqfi.yaml` to the correct absolute path. Path is validated at startup in `AppSettings.from_yaml()`.
 
 **LLM mode throws 401 / 403 errors:** Verify `ANTHROPIC_API_KEY` is set correctly in `.env`. Errors from mcp-data indicate the API key is invalid or expired.
 
 **Tests fail with "database is locked":** Close any other processes accessing the test database. If running tests in parallel, use `pytest -n 1` to disable parallelism.
+
+```
+
+**Filesystem context (what actually exists):**
+`config/` contains: cqfi.yaml

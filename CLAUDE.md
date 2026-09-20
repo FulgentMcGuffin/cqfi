@@ -18,17 +18,17 @@ The agent exposes both a **CLI REPL** (`cqfi`) and **GUI chat** (`cqfi-gui`) for
 ```mermaid
 graph TD
     Input["👤 User Input<br/>CLI REPL or GUI Chat"]
-    
+
     Input -->|Direct<br/>Commands| Direct["Direct Commands<br/>pricing, sessions"]
     Input -->|LLM<br/>Planning| LLM["LLM Planning<br/>mcp-data"]
-    
+
     Direct --> Router["🔀 Router / Agent"]
     LLM --> Router
-    
+
     Router --> QL["QuantLib<br/>pricing<br/>curves<br/>analytics"]
     Router --> MCP["mcp-data<br/>queries<br/>SQL"]
     Router --> Sessions["Sessions<br/>manager<br/>save/load"]
-    
+
     QL --> Cache["💾 framecache SQLite<br/>quant_cache.db"]
     MCP --> Cache
     Sessions --> Cache
@@ -38,7 +38,7 @@ graph TD
 - **`config.py`** — Load and validate YAML configs; resolve paths from environment or config files
 - **`agent/`** — CLI REPL entry point (`cli.py`), query routing and planning logic (`planner.py`)
 - **`quantlib/`** — Curve construction, CMT pricing, analytics, market context
-- **`data/`** — Load zero/par rates from ycs_data.duckdb or ycs_data.sqlite or 
+- **`data/`** — Load zero/par rates from ycs_data.duckdb or ycs_data.sqlite or
 - **`cache/`** — framecache integration, session save/load, flattened SQL tables for LLM queries
 - **`gui/`** — PySide6 GUI entry point, chat dialog, result rendering
 
@@ -76,7 +76,7 @@ uv run pytest -v                                  # verbose output
 ### Debug in Cursor / VS Code
 Launch profiles in `.vscode/launch.json`:
 - `cqfi` — CLI interactive REPL
-- `cqfi: one-shot query` — CLI with a preset query (edit in `launch.json`)
+- `cqfi: one-shot query` — CLI with a preset query (edit in `.vscode/launch.json`)
 - `cqfi: price CMT` — CLI pricing smoke-run (`USA 2020-01-02`)
 - `cqfi-gui` — GUI window
 - `cqfi-gui: custom config` — GUI with explicit config file
@@ -98,12 +98,10 @@ Launch profiles in `.vscode/launch.json`:
 - **Query modes** — LLM (agent, single-shot) vs. rule-based syntax (offline)
 
 ### QuantLib Pricing (`quantlib/`)
-- **`curve.py`** — `ZeroInterp` enum (18 methods), `build_zero_curve()`, curve fitting and interpolation
-- **`cmt.py`** — `price_cmts_from_rates()`, CMT (Constant Maturity Treasury) pricing
-- **`analytics.py`** — Bond analytics (duration, convexity, yield metrics)
-- **`analytics_calculator.py`** — Batch calculation of bond analytics
-- **`market_context.py`** — Market context and macro indicators
-- **`issuers.py`** — 19 sovereign issuers with QuantLib conventions (day-count, calendar, coupon frequency)
+- **`quantlib_curve.py`** — Curve construction and interpolation
+- **`cmt.py`** — CMT (Constant Maturity Treasury) pricing
+- **`quantlib_analytics_calculator.py`** — Batch calculation of bond analytics and CMT pricing
+- **`quantlib_market_context.py`** — Market context and macro indicators
 
 ### Data Loading (`data/rates_loader.py`)
 - Load zero or par rates from ycs_data.db
@@ -225,3 +223,9 @@ Queries are auto-routed to INPUT (yield curves) or CACHE (pricing results) based
 - After a MEX write, say exactly what changed and its sharing boundary: a local draft is checkout-only and nothing is shared; a canonical artifact is written to the working tree and requires commit/push to share.
 - Skill activation is not approval for canonical actions.
 <!-- mex-agent:skills:end -->
+
+```
+
+**Filesystem context (what actually exists):**
+`./` contains: CLAUDE.md, IMPLEMENTATION_SUMMARY.md, LICENSE, README.md, batch_bond_analytics.py, config, data, docs, main.py, node_modules, notebooks, package-lock.json, package.json, pyproject.toml, resource, scripts, semantics, shipready_results, src, tests, uv.lock
+All `.json` files in project: package.json, package-lock.json, shipready_results\analysis_20260901_180509_88dd3d\analysis_status.json, shipready_results\analysis_20260901_180509_88dd3d\progress\connected_code_map.json, shipready_results\analysis_20260901_180509_88dd3d\progress\business_workflow_review.json, data\evals\runs\run_20260806_233259.json, data\evals\runs\run_20260806_222514.json, data\evals\runs\run_20260806_221347.json, data\evals\runs\run_20260806_211018.json, data\evals\runs\run_20260806_191306.json, data\evals\runs\run_20260806_182747.json, data\evals\runs\run_20260806_163940.json, data\evals\runs\run_20260802_131625.json, data\evals\runs\run_20260802_115052.json, data\evals\runs\run_20260802_113917.json, data\evals\runs\run_20260802_112007.json, data\evals\runs\run_20260802_110040.json, data\evals\runs\run_20260802_023520.json, data\evals\runs\run_20260802_022857.json

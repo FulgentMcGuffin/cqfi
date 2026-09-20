@@ -18,7 +18,7 @@ edges:
   - target: patterns/query-routing-and-caching.md
     condition: when working with caching, database access, or data models
 grounds_to: []
-last_updated: 2026-09-14
+last_updated: 2026-09-20
 ---
 
 # Conventions
@@ -31,7 +31,7 @@ last_updated: 2026-09-14
 
 ## Naming
 
-- **Files**: snake_case (`quantlib_analytics_calculator.py`, `cache_registry.py`), grouping by domain (e.g., `src/cqfi/quantlib/`, `src/cqfi/agent/`, `src/cqfi/cache/`)
+- **Files**: snake_case (`analytics_calculator.py`, `registry.py`), grouping by domain (e.g., `src/cqfi/quantlib/`, `src/cqfi/agent/`, `src/cqfi/cache/`)
 - **Functions / Methods**: snake_case, verb-first (`compute_bond_analytics`, `get_cache_registry`, `route_query`)
 - **Classes**: PascalCase, descriptive (`QuantlibAnalyticsCalculator`, `FixedIncomeAnalyticsOutput`, `CacheRegistry`)
 - **Database tables / columns**: snake_case, plural for tables (`bond_analytics`, `cmt_analytics`, `calculation_log`)
@@ -68,3 +68,8 @@ Before presenting any code:
 - [ ] New files follow naming convention (snake_case, grouped by domain in `src/cqfi/`)
 - [ ] Type hints on all function signatures, use `| None` not `Optional`
 - [ ] No time-series lookups with future data — splits and features are chronological only
+
+```
+
+**Filesystem context (what actually exists):**
+`./` contains: CLAUDE.md, IMPLEMENTATION_SUMMARY.md, LICENSE, README.md, batch_bond_analytics.py, config, data, docs, main.py, node_modules, notebooks, package-lock.json, package.json, pyproject.toml, resource, scripts, semantics, shipready_results, src, tests, uv.lock
