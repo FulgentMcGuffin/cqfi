@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Literal
 
+import polars as pl
 from langchain_core.tools import StructuredTool
 
 from cqfi.analytics_input import BondAnalyticsInput, CmtAnalyticsInput
@@ -19,7 +20,15 @@ from cqfi.bond_futures import (
 )
 from cqfi.bond_manager import BondManager
 from cqfi.composite_tenor import CompositeTenor
-from cqfi.data.rates_loader import list_available_dates
+from cqfi.config import get_settings
+from cqfi.curve_keys import RepoCurveKey, SwapCurveKey
+from cqfi.data.rates_loader import (
+    REPO_TABLE,
+    SWAP_TABLE,
+    list_available_dates,
+    list_rate_curve_keys,
+    load_curve_rates,
+)
 from cqfi.delivery_basket import (
     DeliveryBasket,
     DeliveryBasketManager,
@@ -27,7 +36,7 @@ from cqfi.delivery_basket import (
     parse_fut_command,
     resolve_basket,
 )
-from cqfi.issuers import resolve_issuer
+from cqfi.issuers import RateType, resolve_issuer
 from cqfi.numeric_term_structure import NumericTermStructure
 from cqfi.quantlib.quantlib_analytics_calculator import (
     QuantLibAnalyticsCalculator,
@@ -35,7 +44,12 @@ from cqfi.quantlib.quantlib_analytics_calculator import (
 from cqfi.quantlib.quantlib_bond_future_calculator import (
     QuantLibBondFutureCalculator,
 )
-from cqfi.quantlib.quantlib_market_context import QuantlibMarketContext
+from cqfi.quantlib.quantlib_curve import ZeroCurveBuildOptions
+from cqfi.quantlib.quantlib_market_context import (
+    REPO_RFR_LABEL,
+    SWAP_PAR_LABEL,
+    QuantlibMarketContext,
+)
 from cqfi.quantlib.quantlib_market_context_manager import (
     QuantlibMarketContextManager,
 )
@@ -227,6 +241,176 @@ def _market_context_for(
     return manager.get(as_of)
 
 
+CurveType = Literal["bond_zero", "bond_par", "swap", "repo"]
+_CURVE_TYPE_LABELS: dict[str, str] = {
+    "bond_zero": "BOND_ZERO",
+    "bond_par": "BOND_PAR",
+    "swap": SWAP_PAR_LABEL,
+    "repo": REPO_RFR_LABEL,
+}
+
+
+def _resolve_rate_curve_key(
+    curve_type: str,
+    currency: str,
+    as_of: date,
+    float_period: str | None,
+    fixed_period: str | None,
+    index: str | None,
+) -> SwapCurveKey | RepoCurveKey:
+    """Pick the unique DB curve key matching the given (partial) spec."""
+    table = SWAP_TABLE if curve_type == "swap" else REPO_TABLE
+    candidates = list_rate_curve_keys(get_settings().ycs_db_path, table, as_of, currency)
+    wanted = {
+        "float_period" if curve_type == "swap" else "period": float_period,
+        "fixed_period": fixed_period if curve_type == "swap" else None,
+        "index": index,
+    }
+    matches = [
+        k
+        for k in candidates
+        if all(v is None or getattr(k, f) == v.strip().upper() for f, v in wanted.items())
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise LookupError(
+            f"No {curve_type} curve for {currency.upper()} on {as_of.isoformat()} "
+            f"matching {wanted}. Available that day: {[str(k) for k in candidates] or 'none'}"
+        )
+    raise LookupError(
+        f"Ambiguous {curve_type} curve for {currency.upper()}; specify periods/index. "
+        f"Options: {[str(k) for k in matches]}"
+    )
+
+
+def _rows_payload(frame: pl.DataFrame) -> dict:
+    return {"columns": frame.columns, "rows": frame.to_dicts(), "row_count": frame.height}
+
+
+def get_curve(
+    as_of: str,
+    curve_type: CurveType,
+    name: str,
+    float_period: str | None = None,
+    fixed_period: str | None = None,
+    index: str | None = None,
+) -> dict:
+    """Build (or reuse) a yield curve and return its pillar table for viewing or plotting.
+
+    Use this to show, compare or plot a curve on one date. Bond curves are
+    sovereign curves per issuer; swap curves are fixed-for-floating swap par
+    curves per currency (discounted off the repo curve when available); repo
+    curves are repo / risk-free funding curves per currency. Swap and repo are
+    different curves with different uses, never substitute one for the other.
+    Call list_curves first if unsure which currencies or periods exist.
+
+    Args:
+        as_of: Valuation date in "YYYY-MM-DD" format.
+        curve_type: One of "bond_zero", "bond_par" (sovereign bond curves), "swap"
+            (swap par curve) or "repo" (repo/RFR funding curve).
+        name: Issuer code for bond curves (e.g. "USA", "DEU"); ISO currency code
+            for swap and repo curves (e.g. "USD", "EUR").
+        float_period: Swap floating-leg period or repo coupon period, e.g. "3M".
+            Omit to use the only one available for the currency.
+        fixed_period: Swap fixed-leg period, e.g. "6M" or "1Y". Swap only; omit
+            to use the only one available.
+        index: Floating/repo index name, e.g. "SOFR". Omit when unspecified.
+
+    Returns:
+        Dict with status, message, curve description, and a table (columns, rows)
+        of tenor_years, tenor_label, input_rate_pct, zero_rate_pct and, for swap
+        and repo curves, discount_factor, fwd_rate_pct and discounting.
+    """
+    try:
+        if curve_type not in _CURVE_TYPE_LABELS:
+            raise ValueError(f"curve_type must be one of {sorted(_CURVE_TYPE_LABELS)}")
+        as_of_date = date.fromisoformat(as_of.strip()[:10])
+        label = _CURVE_TYPE_LABELS[curve_type]
+        if curve_type in ("bond_zero", "bond_par"):
+            issuer = resolve_issuer(name)
+            options = ZeroCurveBuildOptions(
+                rate_type=RateType.ZERO if curve_type == "bond_zero" else RateType.PAR
+            )
+            QuantlibMarketContextManager.instance().get(as_of_date, issuer.source_code, label)
+            rates_df = load_curve_rates(
+                get_settings().ycs_db_path, issuer, as_of_date, rate_type=options.rate_type
+            )
+            _, diag = options.build(issuer, as_of_date, rates_df)
+            frame = diag.with_columns(
+                pl.Series("tenor_label", rates_df["tenor_label"])
+            ).select(
+                "tenor_years",
+                "tenor_label",
+                "input_rate_pct",
+                pl.col("curve_zero_pct").alias("zero_rate_pct"),
+            )
+            curve = f"{label} {issuer.source_code}"
+        else:
+            key = _resolve_rate_curve_key(
+                curve_type, name, as_of_date, float_period, fixed_period, index
+            )
+            context = QuantlibMarketContextManager.instance().get(as_of_date)
+            if context is None:
+                context = QuantlibMarketContext(as_of=as_of_date)
+            if curve_type == "swap":
+                context.ensure_swap_curve(key)
+            else:
+                context.ensure_repo_curve(key)
+            frame = context.curve_diagnostics[(label, key)]
+            curve = str(key)
+        return {
+            "status": "success",
+            "message": f"{curve} curve on {as_of_date.isoformat()} ({frame.height} pillars)",
+            "curve": curve,
+            **_rows_payload(frame),
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc), "message": f"Failed to build curve: {exc}"}
+
+
+def list_curves(as_of: str | None = None, curve_type: Literal["swap", "repo"] | None = None) -> dict:
+    """List the swap and repo curves available in the rate database.
+
+    Bond curves are available for every supported sovereign issuer code and are
+    not listed here.
+
+    Args:
+        as_of: Optional date "YYYY-MM-DD"; restricts to curves quoted that day.
+        curve_type: Optional "swap" or "repo" to list only one kind.
+
+    Returns:
+        Dict with status, message and a table (columns, rows) of curve_type,
+        currency, float_period, fixed_period and index.
+    """
+    try:
+        db = get_settings().ycs_db_path
+        day = date.fromisoformat(as_of.strip()[:10]) if as_of else None
+        rows: list[dict] = []
+        if curve_type in (None, "swap"):
+            rows += [
+                {"curve_type": "swap", "currency": k.currency, "float_period": k.float_period,
+                 "fixed_period": k.fixed_period, "index": k.index}
+                for k in list_rate_curve_keys(db, SWAP_TABLE, day)
+            ]
+        if curve_type in (None, "repo"):
+            rows += [
+                {"curve_type": "repo", "currency": k.currency, "float_period": k.period,
+                 "fixed_period": k.period, "index": k.index}
+                for k in list_rate_curve_keys(db, REPO_TABLE, day)
+            ]
+        frame = pl.DataFrame(
+            rows, schema=["curve_type", "currency", "float_period", "fixed_period", "index"]
+        )
+        return {
+            "status": "success",
+            "message": f"{frame.height} swap/repo curves{f' on {day}' if day else ''}",
+            **_rows_payload(frame),
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc), "message": f"Failed to list curves: {exc}"}
+
+
 def check_market_context(
     as_of: str,
     issuer: str | None = None,
@@ -236,12 +420,30 @@ def check_market_context(
 
     Args:
         as_of: Valuation date in "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS" format.
-        issuer: Optional issuer code (e.g., "USA", "DEU"). Defaults to None (full context).
-        curve_label: Curve collection label. Defaults to "BOND_ZERO".
+        issuer: Optional issuer code (e.g., "USA", "DEU"), or an ISO currency code
+            (e.g. "USD") when curve_label is "SWAP_PAR" or "REPO_RFR".
+        curve_label: Curve collection label: "BOND_ZERO" (default), "BOND_PAR",
+            "SWAP_PAR" (swap par curves) or "REPO_RFR" (repo funding curves).
 
     Returns:
         Dictionary with status and details about the market context.
     """
+    if curve_label in (SWAP_PAR_LABEL, REPO_RFR_LABEL) and issuer:
+        kind = "swap" if curve_label == SWAP_PAR_LABEL else "repo"
+        result = get_curve(as_of, kind, issuer)
+        ok = result["status"] == "success"
+        return {
+            "status": "success" if ok else "error",
+            "date": as_of,
+            "issuer": issuer.upper(),
+            "curve_label": curve_label,
+            "has_context": ok,
+            "message": (
+                f"Market context has {result['curve']} for {as_of}"
+                if ok
+                else result["message"]
+            ),
+        }
     try:
         # Parse the date/datetime string
         as_of_value: date | datetime
@@ -830,6 +1032,18 @@ check_market_context_lc_tool = StructuredTool.from_function(
     parse_docstring=True,
 )
 
+get_curve_lc_tool = StructuredTool.from_function(
+    func=get_curve,
+    name="get_curve",
+    parse_docstring=True,
+)
+
+list_curves_lc_tool = StructuredTool.from_function(
+    func=list_curves,
+    name="list_curves",
+    parse_docstring=True,
+)
+
 compute_bond_analytics_lc_tool = StructuredTool.from_function(
     func=compute_bond_analytics,
     name="compute_bond_analytics",
@@ -853,3 +1067,57 @@ compute_bond_future_analytics_lc_tool = StructuredTool.from_function(
     name="compute_bond_future_analytics",
     parse_docstring=True,
 )
+
+
+CURVE_HELP_TEXT = (
+    "Curve Viewer\n"
+    "============\n"
+    "\n"
+    "/curve <type> <name> <YYYY-MM-DD> [float_period] [fixed_period]\n"
+    "  <type>: bond (zero), bond_par, swap (swap par curve), repo (repo/RFR funding curve)\n"
+    "  <name>: issuer code for bond curves (USA, DEU, ...); currency for swap/repo (USD, EUR, ...)\n"
+    "  periods default to the only combination quoted for that currency\n"
+    "/curve list [YYYY-MM-DD]  — list available swap and repo curves\n"
+    "\n"
+    "Examples:\n"
+    "  /curve swap USD 2024-01-02\n"
+    "  /curve repo EUR 2024-01-02\n"
+    "  /curve bond DEU 2024-01-02\n"
+)
+
+_CURVE_RE = re.compile(
+    r"^/curve\s+(?P<type>bond|bond_zero|bond_par|swap|repo)\s+(?P<name>[A-Za-z]+)\s+"
+    r"(?P<date>\d{4}-\d{2}-\d{2})(?:\s+(?P<float>\w+))?(?:\s+(?P<fixed>\w+))?\s*$",
+    re.IGNORECASE,
+)
+_CURVE_LIST_RE = re.compile(r"^/curve\s+list(?:\s+(?P<date>\d{4}-\d{2}-\d{2}))?\s*$", re.IGNORECASE)
+
+
+def execute_curve_command(text: str) -> dict | None:
+    """Parse and execute ``/curve``; ``None`` when *text* is not a /curve command."""
+    stripped = text.strip()
+    if not re.match(r"^/curve\b", stripped, re.IGNORECASE):
+        return None
+    if list_match := _CURVE_LIST_RE.match(stripped):
+        result = list_curves(list_match.group("date"))
+    elif match := _CURVE_RE.match(stripped):
+        curve_type = match.group("type").lower()
+        result = get_curve(
+            match.group("date"),
+            "bond_zero" if curve_type == "bond" else curve_type,
+            match.group("name"),
+            float_period=match.group("float"),
+            fixed_period=match.group("fixed"),
+        )
+    else:
+        return {"status": "error", "message": CURVE_HELP_TEXT}
+    if result.get("status") == "success":
+        result["dataframe"] = pl.DataFrame(result["rows"], schema=result["columns"])
+    return result
+
+
+def format_curve_result(result: dict) -> str:
+    """Render a /curve result for CLI output."""
+    if result.get("status") != "success":
+        return result.get("message", str(result))
+    return f"{result['message']}\n\n{result['dataframe']}"

@@ -33,6 +33,16 @@ the GUI) renders tables and charts from the result.
   cached in a process-wide singleton. Use `/mctx` in the CLI or GUI, or the
   `check_market_context` LLM tool, to verify/build curves.
 
+- **Swap and repo curves** — per-currency swap par curves (`swap_par_rates`)
+  and repo / risk-free funding curves (`repo_rfr_rates`) from `ycs_data`, for
+  AUD, CAD, CHF, EUR, GBP, JPY, NOK, NZD, SEK and USD. Repo curves are
+  bootstrapped from par-style term quotes; swap curves are dual-curve,
+  discounted off the same-currency repo curve (self-discounting when no repo
+  quote exists that day). They are keyed by two deliberately distinct types —
+  `SwapCurveKey` and `RepoCurveKey` — and stored in the market context under
+  `SWAP_PAR` / `REPO_RFR`. View any curve (bond, swap or repo) as a pillar
+  table and chart with `/curve` or the `get_curve` / `list_curves` LLM tools.
+
 - **Bond lookup** — look up individual bonds from `bond_universe` by
   `user_friendly_id` or `bond_id` via `/bond`, `@mention` syntax, or the
   `get_bond` LLM tool. Bonds deserialize into typed `Bond` objects via
@@ -71,7 +81,7 @@ the GUI) renders tables and charts from the result.
 
   | Prefix | Database | Typical questions |
   |--------|----------|-----------------|
-  | `input:` | `ycs_db` | zero/par rates, FX, correlations, curve slopes |
+  | `input:` | `ycs_db` | zero/par rates, swap par rates, repo/RFR rates, FX, correlations, curve slopes |
   | `cache:` | `quant_cache_db` | session bond/CMT analytics, calculation log |
   | `bond_analytics:` | `bond_analytics_db` | bond universe, stored bond/CMT analytics, bond future conventions and basis analytics |
 
@@ -213,8 +223,30 @@ CMT pricing reads `ycs_data` and returns a DataFrame; it does **not** write to
 cqfi> /mctx 2024-02-15              # Check all curves for the date
 cqfi> /mctx 2024-02-15 USA          # Check USA market for the date
 cqfi> /mctx 2024-02-15 USA BOND_ZERO
+cqfi> /mctx 2024-02-15 USD SWAP_PAR # Build the USD swap curve (currency, not issuer)
 cqfi> /mctx                         # Show /mctx help
 ```
+
+#### Curves
+
+```
+cqfi> /curve swap USD 2024-01-02          # USD swap par curve (dual-curve, off repo)
+cqfi> /curve repo EUR 2024-01-02          # EUR repo/RFR funding curve
+cqfi> /curve swap EUR 2024-01-02 6M 1Y    # explicit float / fixed periods
+cqfi> /curve bond DEU 2024-01-02          # sovereign zero curve (bond_par for par)
+cqfi> /curve list 2024-01-02              # swap/repo curves quoted that day
+cqfi> /curve                              # Show /curve help
+```
+
+Each run returns one row per pillar: `tenor_years`, `tenor_label`,
+`input_rate_pct`, `zero_rate_pct` and, for swap and repo curves,
+`discount_factor`, `fwd_rate_pct` (simple forward over the float period) and
+`discounting` (`repo` or `self`). In the GUI the table is also plotted.
+Periods default to the only combination quoted for that currency; pass them
+explicitly when more than one exists.
+
+Bond curves use a fixed 13-pillar set (`BOND_TENOR_COLUMNS`); the extra 3M, 6Y,
+8Y and 9Y columns are only used by swap and repo curves.
 
 #### Bond lookup
 
@@ -362,6 +394,9 @@ In LLM mode the agent can call SQL tools **and** fixed-income tools:
 - `build_delivery_basket` — build and name a bond future delivery basket
 - `compute_bond_future_analytics` — basis analytics for a delivery basket, with an
   optional repo rate or term structure
+- `get_curve` — build a bond, swap or repo curve and return its pillar table
+  (rendered as a table and chart in the GUI)
+- `list_curves` — list the swap and repo curves available (optionally on a date)
 
 Example prompts:
 
@@ -372,6 +407,8 @@ Calculate analytics for fraapr029
 Compute CMT analytics for DEU 5y on 2024-02-15
 What is the duration of USA 10Y on 2024-02-15?
 What is the CTD for the March 2027 BTP future?
+Plot the EUR swap and repo curves on 2024-01-02
+What was the 10Y GBP swap rate over 2023?
 ```
 
 Without an API key, use rule syntax (works offline):
@@ -476,7 +513,7 @@ uv run cqfi-gui --config config/cqfi.yaml
 ```
 
 The GUI uses the same `config/cqfi.yaml`, runtime JSON settings, dataset routing,
-and slash commands (`/bond`, `/mctx`, `/calc` for bond or CMT analytics, `/dlv`,
+and slash commands (`/bond`, `/mctx`, `/curve`, `/calc` for bond or CMT analytics, `/dlv`,
 `/fut`, `/batch`, `/cache`, `/save_cache`, `/clean`, …) as the CLI. Set `ANTHROPIC_API_KEY` in `.env`
 for LLM-powered queries.
 
@@ -684,6 +721,55 @@ API-only for now.
 
 CLI equivalent: `/dlv myitabasket FBTP` then `/fut myitabasket 2026-05-15 3.0`
 
+### Swap and repo curves (Python API)
+
+Swap and repo curves share a similar shape — currency, coupon period(s),
+index — but are keyed by different classes because they are used for
+different things: `SwapCurveKey` names a fixed-for-floating swap par curve
+(derivatives pricing), `RepoCurveKey` a repo / risk-free funding curve
+(financing and discounting). Passing one where the other is expected raises
+`TypeError`. Key fields are validated on construction.
+
+```python
+from datetime import date
+
+from cqfi.quantlib.quantlib_market_context import (
+    REPO_RFR_LABEL,
+    SWAP_PAR_LABEL,
+    QuantlibMarketContext,
+    RepoCurveKey,
+    SwapCurveKey,
+)
+
+ctx = QuantlibMarketContext(as_of=date(2024, 1, 2))
+
+swap_key = SwapCurveKey("USD", float_period="3M", fixed_period="6M")
+swap = ctx.ensure_swap_curve(swap_key)          # also builds the USD repo curve
+repo = ctx.ensure_repo_curve(RepoCurveKey("USD", period="3M"))
+
+print(swap.discount(5.0), repo.discount(5.0))
+print(ctx.curve_diagnostics[(SWAP_PAR_LABEL, swap_key)])   # pillar table
+print(ctx.curve_collection(REPO_RFR_LABEL).repo_curve_keys())
+```
+
+Lower-level pieces, usable without a context:
+
+| Function | Purpose |
+|----------|---------|
+| `rates_loader.load_swap_rates` / `load_repo_rates` | Long-form pillar rates for a key and date |
+| `rates_loader.list_rate_curve_keys` | Distinct keys in `swap_par_rates` / `repo_rfr_rates`, optionally per date/currency |
+| `quantlib_curve.ql_build_repo_curve` | Par-style bootstrap, self-discounting |
+| `quantlib_curve.ql_build_swap_curve` | Swap bootstrap; pass a repo curve handle for dual-curve |
+| `rate_conventions.resolve_currency_conventions` | Calendar, spot lag and day counts per currency |
+
+Curve construction: pillars up to the float period use deposit helpers,
+longer pillars use swap helpers against a generic IBOR-style index with the
+float period's tenor, bootstrapped with `PiecewiseLogCubicDiscount` by
+default (any `QLZeroInterp` piecewise member can be passed). The repo curve is
+not yet used by bond-future carry or implied repo.
+
+CLI equivalent: `/curve swap USD 2024-01-02`
+
 ## Curve interpolation methods
 
 Pass `interpolation=QLZeroInterp.<METHOD>` to `ql_build_zero_curve` /
@@ -841,7 +927,7 @@ column-level documentation for humans and agents.
 
 | Database | Semantics file | Tables described |
 |----------|----------------|------------------|
-| `ycs_data` | `semantics/ycs_data.yaml` | zero/par rates, FX, correlations |
+| `ycs_data` | `semantics/ycs_data.yaml` | zero/par rates, swap par rates, repo/RFR rates, FX, correlations |
 | `bond_analytics_db` | `semantics/bond_analytics.yaml` | all seven tables above |
 | `quant_cache_db` | `semantics/quant_cache.yaml` | session subset: `bond_analytics`, `cmt_analytics`, `bond_future_basket_outputs`, `bond_future_outputs`, plus `calculation_log` |
 
@@ -882,7 +968,7 @@ Paths to each semantics file are set in `config/cqfi.yaml` (`ycs_semantics`,
 flowchart TD
     User["👤 User<br/>cqfi / cqfi-gui"]
     
-    User -->|Direct commands| DCmd["Direct Commands<br/>price cmt, /bond,<br/>/mctx, /calc,<br/>/dlv, /fut,<br/>/cache, save/load"]
+    User -->|Direct commands| DCmd["Direct Commands<br/>price cmt, /bond,<br/>/mctx, /curve, /calc,<br/>/dlv, /fut,<br/>/cache, save/load"]
     User -->|LLM queries| LLM["LLM Agent<br/>mcp-data +<br/>extra tools"]
     User -->|Rule syntax| Rules["Rule-based SQL<br/>tables, schema,<br/>sql: SELECT"]
     
@@ -894,7 +980,7 @@ flowchart TD
     Router --> Bond["📚 bond_analytics_db<br/>bond_universe,<br/>durable analytics,<br/>bond future conventions"]
     Router --> Cache["⚡ quant_cache_db<br/>session analytics,<br/>cmt_analytics"]
     
-    YCS --> MktCtx["🌍 QuantlibMarketContextManager<br/>curves, FX, context"]
+    YCS --> MktCtx["🌍 QuantlibMarketContextManager<br/>bond, swap & repo curves,<br/>FX, context"]
     Bond --> MktCtx
     Cache --> CacheMgr["💾 CacheManager<br/>sessions,<br/>@cache_bond_analytics,<br/>@cache_cmt_analytics"]
     
@@ -926,6 +1012,10 @@ flowchart TD
   application exit to merge or discard `quant_cache_db` analytics.
 
 - **`QuantlibMarketContextManager`** lazily builds curves from `ycs_data`.
+
+- **`SwapCurveKey` / `RepoCurveKey`** (`curve_keys.py`) key currency-level
+  curves; `QuantlibMarketContext.ensure_swap_curve` / `ensure_repo_curve`
+  build them on demand with conventions from `rate_conventions.py`.
 
 - **`QuantLibAnalyticsCalculator.compute_bond_analytics`** returns
   `(bond_metrics, mm_cmt_metrics, mm_fc_cmt_metrics)` and optionally persists
@@ -971,6 +1061,8 @@ src/cqfi/
   composite_tenor.py                — CompositeTenor (forward-start CMT tenors)
   tenor.py                          — Tenor parse/simplify/calendar math
   numeric_term_structure.py         — tenor → rate mappings (repo curves, etc.)
+  curve_keys.py                     — SwapCurveKey, RepoCurveKey (validated)
+  rate_conventions.py               — per-currency swap/repo conventions
   analytics_input.py                — BondAnalyticsInput, CmtAnalyticsInput
   analytics_output.py               — FixedIncomeAnalyticsOutput
   analytics_calculator.py           — AnalyticsCalculator protocol
@@ -980,7 +1072,7 @@ src/cqfi/
   bond_future_output.py             — BondFutureOutput, BondFutureBasketOutput
   bond_future_calculator.py         — BondFutureCalculator protocol
   day_of_month.py                   — DayOfMonthSpec (reference/delivery day rules)
-  cli_tools.py                      — get_bond, check_market_context, compute_bond_analytics, compute_cmt_analytics, build_delivery_basket, compute_bond_future_analytics, /calc /dlv /fut parsing
+  cli_tools.py                      — get_bond, check_market_context, compute_bond_analytics, compute_cmt_analytics, build_delivery_basket, compute_bond_future_analytics, get_curve, list_curves, /calc /dlv /fut /curve parsing
   batch/                            — batch planner, process-pool engines, /batch command parsing
   agent/
     cli.py                          — cqfi REPL, slash commands, query routing
@@ -994,7 +1086,7 @@ src/cqfi/
     quantlib_conversion_factor.py   — exchange CF formulas (CME, EUREX, ICE, JGB)
     cmt.py                          — CMT pricing (no cache write)
   data/
-    rates_loader.py                 — read zero/par rates from ycs_data
+    rates_loader.py                 — read zero/par/swap/repo rates from ycs_data
     create_bond_analytics_db.py     — build/populate bond_analytics DB
   cache/
     manager.py                      — CacheManager, sessions, CMT pricing entry

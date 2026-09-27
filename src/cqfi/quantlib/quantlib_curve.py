@@ -9,8 +9,10 @@ from enum import Enum
 import QuantLib as ql
 import polars as pl
 
+from cqfi.curve_keys import RepoCurveKey, SwapCurveKey, period_years, ql_period
 from cqfi.date_utils import to_ql_date as _to_ql_date
 from cqfi.issuers import IssuerProfile, RateType
+from cqfi.rate_conventions import CurrencyConventions, resolve_currency_conventions
 
 
 class QLZeroInterp(str, Enum):
@@ -357,3 +359,132 @@ def ql_build_zero_curve(
         )
 
     return curve_handle, pl.DataFrame(diagnostics)
+
+
+_RATE_CURVE_DEFAULT = QLZeroInterp.LOG_CUBIC_DISCOUNT
+_CURVE_DAY_COUNT = ql.Actual365Fixed()
+
+
+def _tenor_period(years: float) -> ql.Period:
+    return ql.Period(int(round(years * 12)), ql.Months)
+
+
+def _ql_build_par_swap_style_curve(
+    as_of: date,
+    conv: CurrencyConventions,
+    rates_df: pl.DataFrame,
+    float_period: str,
+    fixed_period: str,
+    fixed_day_count: ql.DayCounter,
+    discount_handle: ql.YieldTermStructureHandle | None = None,
+    interpolation: QLZeroInterp | None = None,
+) -> tuple[ql.YieldTermStructureHandle, pl.DataFrame]:
+    """Bootstrap a curve from fixed-for-floating par quotes.
+
+    Pillars up to *float_period* use deposit helpers; longer pillars use swap
+    helpers against a generic IBOR-style index with *float_period* tenor.
+    When *discount_handle* is given the swaps are discounted off it
+    (dual-curve); otherwise the curve discounts itself.
+    """
+    interp = QLZeroInterp(interpolation) if interpolation else _RATE_CURVE_DEFAULT
+    cls = _QL_PAR_CURVE_CLS.get(interp)
+    if cls is None:
+        valid = ", ".join(k.value for k in _QL_PAR_CURVE_CLS)
+        raise ValueError(f"{interp.name} not supported for swap/repo curves. Valid: {valid}")
+
+    ql_as_of = _to_ql_date(as_of)
+    ql.Settings.instance().evaluationDate = ql_as_of
+    calendar = conv.calendar()
+    float_tenor = ql_period(float_period)
+    fixed_freq = ql_period(fixed_period).frequency()
+    index = ql.IborIndex(
+        f"{conv.ccy}-{float_period}",
+        float_tenor,
+        conv.settlement_days,
+        conv.ql_currency(),
+        calendar,
+        conv.business_convention,
+        False,
+        conv.float_day_count,
+    )
+    discount = discount_handle if discount_handle is not None else ql.YieldTermStructureHandle()
+
+    tenor_years = rates_df["tenor_years"].to_list()
+    rates = rates_df["rate_pct"].to_list()
+    helpers = []
+    for years, rate in zip(tenor_years, rates, strict=True):
+        quote = ql.QuoteHandle(ql.SimpleQuote(rate / 100.0))
+        if years <= period_years(float_period) + 1e-9:
+            helpers.append(
+                ql.DepositRateHelper(
+                    quote, _tenor_period(years), conv.settlement_days, calendar,
+                    conv.business_convention, False, conv.float_day_count,
+                )
+            )
+        else:
+            helpers.append(
+                ql.SwapRateHelper(
+                    quote, _tenor_period(years), calendar, fixed_freq,
+                    conv.business_convention, fixed_day_count, index,
+                    ql.QuoteHandle(), ql.Period(0, ql.Days), discount,
+                )
+            )
+
+    curve = cls(ql_as_of, helpers, _CURVE_DAY_COUNT)
+    curve.enableExtrapolation()
+
+    labels = rates_df["tenor_label"].to_list() if "tenor_label" in rates_df.columns else [None] * len(rates)
+    rows = []
+    for years, label, rate in zip(tenor_years, labels, rates, strict=True):
+        pillar = calendar.advance(ql_as_of, _tenor_period(years), conv.business_convention)
+        fwd_end = calendar.advance(pillar, float_tenor, conv.business_convention)
+        rows.append(
+            {
+                "tenor_years": years,
+                "tenor_label": label,
+                "input_rate_pct": rate,
+                "zero_rate_pct": curve.zeroRate(pillar, _CURVE_DAY_COUNT, ql.Continuous).rate() * 100.0,
+                "discount_factor": curve.discount(pillar),
+                "fwd_rate_pct": curve.forwardRate(
+                    pillar, fwd_end, conv.float_day_count, ql.Simple
+                ).rate() * 100.0,
+                "discounting": "self" if discount_handle is None else "repo",
+            }
+        )
+    return ql.YieldTermStructureHandle(curve), pl.DataFrame(rows)
+
+
+def ql_build_repo_curve(
+    key: RepoCurveKey,
+    as_of: date,
+    rates_df: pl.DataFrame,
+    interpolation: QLZeroInterp | None = None,
+) -> tuple[ql.YieldTermStructureHandle, pl.DataFrame]:
+    """Bootstrap a self-discounting repo/RFR curve from par-style term quotes.
+
+    Both legs pay every ``key.period`` with the currency's money-market day count.
+    """
+    conv = resolve_currency_conventions(key.currency)
+    return _ql_build_par_swap_style_curve(
+        as_of, conv, rates_df, key.period, key.period, conv.float_day_count,
+        interpolation=interpolation,
+    )
+
+
+def ql_build_swap_curve(
+    key: SwapCurveKey,
+    as_of: date,
+    rates_df: pl.DataFrame,
+    discount_handle: ql.YieldTermStructureHandle | None = None,
+    interpolation: QLZeroInterp | None = None,
+) -> tuple[ql.YieldTermStructureHandle, pl.DataFrame]:
+    """Bootstrap a swap projection curve from par swap quotes.
+
+    Pass the same-currency repo curve as *discount_handle* for dual-curve
+    construction; ``None`` falls back to self-discounting.
+    """
+    conv = resolve_currency_conventions(key.currency)
+    return _ql_build_par_swap_style_curve(
+        as_of, conv, rates_df, key.float_period, key.fixed_period,
+        conv.fixed_day_count, discount_handle, interpolation,
+    )

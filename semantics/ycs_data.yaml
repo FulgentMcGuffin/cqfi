@@ -11,7 +11,11 @@ backend: duckdb
 description: >
   Yield-curve and FX time series. zero_rates and par_rates hold one row per
   (source, date); the tenor columns (Y...) hold the rate for that maturity.
-  spotfx holds spot FX rates. window_corr holds rolling correlations.
+  swap_par_rates holds fixed-for-floating swap par rates and repo_rfr_rates
+  holds repo / risk-free funding rates, one row per (ccy, coupon period(s),
+  index, date). spotfx holds spot FX rates. window_corr holds rolling
+  correlations.
+  
 
 vocabulary:
   # Values stored in the `source` column. Map the country name to its code.
@@ -52,24 +56,70 @@ vocabulary:
     Sweden: SWE
     Norway: NOR
     New Zealand: NZL
-
+  currencies:
+    USD: USD
+    EUR: EUR
+    GBP: GBP
+    JPY: JPY
+    CAD: CAD
+    AUD: AUD
+    NZD: NZD
+    CHF: CHF
+    CNY: CNY
   # Natural-language tenor -> tenor column name. Naming convention:
   # "Y" + zero-padded years, "p" replaces the decimal point
   # (e.g. 0.5Y -> Y000p5, 5Y -> Y005p0, 10Y -> Y010p0, 30Y -> Y030p0).
   tenors:
+    "3M": Y000p25
     "6M": Y000p5
     "1Y": Y001p0
+    "1.5Y": Y001p5
+    "18M": Y001p5
     "2Y": Y002p0
+    "24M": Y002p0
+    "2.5Y": Y002p5
+    "30M": Y002p5
     "3Y": Y003p0
+    "36M": Y003p0
+    "3.5Y": Y003p5
+    "42M": Y003p5
     "4Y": Y004p0
+    "48M": Y004p0
+    "4.5Y": Y004p5
+    "54M": Y004p5
     "5Y": Y005p0
+    "6Y": Y006p0
     "7Y": Y007p0
+    "8Y": Y008p0
+    "9Y": Y009p0
     "10Y": Y010p0
+    "11Y": Y011p0
     "12Y": Y012p0
+    "13Y": Y013p0
+    "14Y": Y014p0
     "15Y": Y015p0
+    "16Y": Y016p0
+    "17Y": Y017p0
+    "18Y": Y018p0
+    "19Y": Y019p0
     "20Y": Y020p0
     "25Y": Y025p0
-    "30Y": Y030p0
+    "30Y": Y030p0    
+  index:
+    "UNSPECIFIED": "Unspecified index for when the curve is specified as a full rate without an index"
+    "LIBOR": "London Interbank Offered Rate"
+    "SOFR": "Secured Overnight Financing Rate for USD"
+    "ESTR": "EUR short term rate"
+    "EONIA": "Euro Overnight Index Average for EUR"
+    "TIBOR": "Tokyo Interbank Offered Rate for JPY"
+    "SONIA": "Sterling Overnight Index Average for GBP"
+    "FEDFUNDS": "Federal Funds Rate for USD"
+    "EURIBOR": "Euro Interbank Offered Rate for EUR"
+    "GBP LIBOR": "British Pound Interbank Offered Rate"
+    "JPY LIBOR": "Japanese Yen Interbank Offered Rate"
+    "CAD LIBOR": "Canadian Dollar Interbank Offered Rate"
+    "AUD LIBOR": "Australian Dollar Interbank Offered Rate"
+    "NZD LIBOR": "New Zealand Dollar Interbank Offered Rate"
 
 conventions:
   date: >
@@ -78,6 +128,15 @@ conventions:
   tenor_columns: >
     Tenor columns follow the pattern Y<years:03d>p<tenths> (point replaced by 'p').
     To compute a spread between two tenors, subtract the two tenor columns.
+  curve_keys: >
+    swap_par_rates and repo_rfr_rates are keyed by currency (ccy), not by
+    source/country. Filter swap curves on ccy (plus coupon_period,
+    coupon_period_fixed and index when more than one combination exists) and
+    repo curves on ccy (plus coupon_period and index). index is currently
+    'UNSPECIFIED' for all rows. Swap and repo rates are different curves:
+    swap par rates price derivatives, repo rates are funding/financing rates.
+    A swap-repo spread joins the two tables on date and ccy. Rows where every
+    tenor column is NULL mean no quote that day.
 
 tables:
   zero_rates:
@@ -119,6 +178,55 @@ tables:
       Y020p0: {type: REAL, description: "20-year par rate."}
       Y025p0: {type: REAL, description: "25-year par rate."}
       Y030p0: {type: REAL, description: "30-year par rate."}
+  swap_par_rates:
+    description: >
+      Standard Fixed for Floating Swap Par rates per currency and date, similar tenor-column layout as zero_rates.
+    columns:
+      date: {type: TEXT, description: "Observation date (YYYY-MM-DD)."}
+      ccy: {type: TEXT, description: "3 letter currency code, e.g. USD, EUR, GBP, JPY, etc."}
+      coupon_period: {type: TEXT, description: "floating leg Coupon period, e.g. 1M, 3M, 6M, 1Y"}
+      coupon_period_fixed: {type: TEXT, description: "fixed leg Coupon period, e.g. 1M, 3M, 6M, 1Y"}
+      index: {type: TEXT, description: "Index for the floating leg, e.g. LIBOR, SOFR, ESTR, EONIA defaults to UNSPECIFIED"}
+      Y000p25: {type: REAL, description: "3-month (0.25Y) swap par rate."}
+      Y000p5: {type: REAL, description: "6-month (0.5Y) swap par rate."}
+      Y001p0: {type: REAL, description: "1-year swap par rate."}
+      Y002p0: {type: REAL, description: "2-year swap par rate."}
+      Y003p0: {type: REAL, description: "3-year swap par rate."}
+      Y004p0: {type: REAL, description: "4-year swap par rate."}
+      Y005p0: {type: REAL, description: "5-year swap par rate."}
+      Y006p0: {type: REAL, description: "6-year swap par rate."}
+      Y007p0: {type: REAL, description: "7-year swap par rate."}
+      Y008p0: {type: REAL, description: "8-year swap par rate."}
+      Y009p0: {type: REAL, description: "9-year swap par rate."}
+      Y010p0: {type: REAL, description: "10-year swap par rate."}
+      Y015p0: {type: REAL, description: "15-year swap par rate."}
+      Y020p0: {type: REAL, description: "20-year swap par rate."}
+      Y025p0: {type: REAL, description: "25-year swap par rate."}
+      Y030p0: {type: REAL, description: "30-year swap par rate."}
+  repo_rfr_rates:
+    description: >
+      Repo rate at different terms per currency and date, similar tenor-column layout as zero_rates.
+    columns:
+      date: {type: TEXT, description: "Observation date (YYYY-MM-DD)."}
+      ccy: {type: TEXT, description: "3 letter currency code, e.g. USD, EUR, GBP, JPY, etc."}
+      coupon_period: {type: TEXT, description: "floating leg Coupon period, e.g. 1M, 3M, 6M, 1Y"}
+      index: {type: TEXT, description: "Index for Repo Rate, e.g. LIBOR, SOFR, ESTR, EONIA defaults to UNSPECIFIED"}
+      Y000p25: {type: REAL, description: "3-month (0.25Y) repo rate."}
+      Y000p5: {type: REAL, description: "6-month (0.5Y) repo rate."}
+      Y001p0: {type: REAL, description: "1-year repo rate."}
+      Y002p0: {type: REAL, description: "2-year repo rate."}
+      Y003p0: {type: REAL, description: "3-year repo rate."}
+      Y004p0: {type: REAL, description: "4-year repo rate."}
+      Y005p0: {type: REAL, description: "5-year repo rate."}
+      Y006p0: {type: REAL, description: "6-year repo rate."}
+      Y007p0: {type: REAL, description: "7-year repo rate."}
+      Y008p0: {type: REAL, description: "8-year repo rate."}
+      Y009p0: {type: REAL, description: "9-year repo rate."}
+      Y010p0: {type: REAL, description: "10-year repo rate."}
+      Y015p0: {type: REAL, description: "15-year repo rate."}
+      Y020p0: {type: REAL, description: "20-year repo rate."}
+      Y025p0: {type: REAL, description: "25-year repo rate."}
+      Y030p0: {type: REAL, description: "30-year repo rate."}
   spotfx:
     description: Spot FX rates per source and date.
     columns:
@@ -169,3 +277,16 @@ examples:
       WHERE source = 'ITA'
       ORDER BY slope_2s10s DESC
       LIMIT 1
+  - q: "10Y USD swap par rate over 2023"
+    sql: >
+      SELECT date, Y010p0 AS swap_10y
+      FROM swap_par_rates
+      WHERE ccy = 'USD'
+        AND date >= '2023-01-01' AND date <= '2023-12-31'
+      ORDER BY date
+  - q: "5Y EUR swap minus repo spread in basis points on 2024-01-02"
+    sql: >
+      SELECT s.date, (s.Y005p0 - r.Y005p0) * 100 AS swap_repo_5y_bp
+      FROM swap_par_rates s
+      JOIN repo_rfr_rates r ON r.date = s.date AND r.ccy = s.ccy
+      WHERE s.ccy = 'EUR' AND s.date = '2024-01-02'

@@ -154,6 +154,8 @@ class QuantlibMarketContextManager:
                         source.curve_collection_options[label]
                     )
 
+        target.curve_diagnostics.update(source.curve_diagnostics)
+
         for label, fxc in source.fx_rates.items():
             if label in target.fx_rates:
                 target.fx_rates[label] = target.fx_rates[label] | fxc

@@ -350,10 +350,12 @@ class LlmWorker(QObject):
         from cqfi.clean.command import execute_clean_bonds, parse_clean_command
         from cqfi.cli_tools import (
             check_market_context,
+            execute_curve_command,
             execute_dlv_command,
             execute_fut_command,
             execute_parsed_calc,
             format_calc_result,
+            format_curve_result,
             format_dlv_result,
             format_fut_result,
             get_bond,
@@ -509,16 +511,17 @@ class LlmWorker(QObject):
             self.finished.emit(answer, None)
             return
 
-        # Bond future commands emit their table as a DataFrame so the table
-        # widget renders it natively rather than as preformatted text.
+        # Bond future and curve commands emit their table as a DataFrame so the
+        # table widget renders (and plots) it natively.
         for execute, render in (
             (execute_dlv_command, format_dlv_result),
             (execute_fut_command, format_fut_result),
+            (execute_curve_command, format_curve_result),
         ):
             try:
                 result = execute(text)
             except Exception as exc:
-                self.finished.emit(f"Bond future error: {exc}", None)
+                self.finished.emit(f"Command error: {exc}", None)
                 return
             if result is not None:
                 if result.get("status") == "success":

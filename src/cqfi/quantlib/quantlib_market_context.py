@@ -36,8 +36,8 @@ Build a bond curve handle and register it on a :class:`QuantlibMarketContext`::
     fx.set_rate("AUD", "USD", 1.45)
 
     ctx = QuantlibMarketContext()
-    ctx.add_curve_collection(curves)
-    ctx.add_fxc(fx)
+    ctx.set_curve_collection(curves)
+    ctx.set_fxc(fx)
 
     # curve_handle is a ql.YieldTermStructureHandle; retrieve via issuer code:
     usa_curve = ctx.curve_collection().bond_curve("USA")
@@ -51,12 +51,27 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
+import polars as pl
 import QuantLib as ql
 
 from cqfi.config import get_settings
-from cqfi.data.rates_loader import load_curve_rates
+from cqfi.curve_keys import RepoCurveKey, SwapCurveKey
+from cqfi.data.rates_loader import (
+    REPO_TABLE,
+    list_rate_curve_keys,
+    load_curve_rates,
+    load_repo_rates,
+    load_swap_rates,
+)
 from cqfi.issuers import IssuerProfile, RateType, resolve_issuer
-from cqfi.quantlib.quantlib_curve import ZeroCurveBuildOptions
+from cqfi.quantlib.quantlib_curve import (
+    ZeroCurveBuildOptions,
+    ql_build_repo_curve,
+    ql_build_swap_curve,
+)
+
+SWAP_PAR_LABEL = "SWAP_PAR"
+REPO_RFR_LABEL = "REPO_RFR"
 
 
 def _normalize_ccy(code: str) -> str:
@@ -141,31 +156,14 @@ class FXC:
         return other | self
 
 
-@dataclass(frozen=True)
-class SwapCurveKey:
-    """Identifier for a swap curve (not yet implemented).
-
-    Swap curves will be keyed by currency, fixed-coupon frequency, and the
-    floating index name (e.g. SOFR, ESTR).
-    """
-
-    currency: str
-    frequency: str
-    index: str
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "currency", _normalize_ccy(self.currency))
-        object.__setattr__(self, "frequency", self.frequency.strip().upper())
-        object.__setattr__(self, "index", self.index.strip().upper())
-
-
 @dataclass
 class QuantLibCurveCollection:
     """Yield curves as of a single valuation date or datetime.
 
     Bond curves are indexed by sovereign issuer code (``USA``, ``DEU``, …) as
-    built by :func:`cqfi.quantlib.quantlib_curve.ql_build_zero_curve`.  Swap curves
-    will be indexed by :class:`SwapCurveKey` once implemented.
+    built by :func:`cqfi.quantlib.quantlib_curve.ql_build_zero_curve`.  Swap
+    curves are indexed by :class:`SwapCurveKey` and repo/funding curves by the
+    distinct :class:`RepoCurveKey`.
     """
 
     as_of: date | datetime
@@ -173,6 +171,9 @@ class QuantLibCurveCollection:
         default_factory=dict, repr=False
     )
     _swap_curves: dict[SwapCurveKey, ql.YieldTermStructureHandle] = field(
+        default_factory=dict, repr=False
+    )
+    _repo_curves: dict[RepoCurveKey, ql.YieldTermStructureHandle] = field(
         default_factory=dict, repr=False
     )
 
@@ -202,43 +203,60 @@ class QuantLibCurveCollection:
         """Issuer codes with a registered bond curve."""
         return sorted(self._bond_curves.keys())
 
+    @staticmethod
+    def _as_handle(
+        curve: ql.YieldTermStructure | ql.YieldTermStructureHandle,
+    ) -> ql.YieldTermStructureHandle:
+        if isinstance(curve, ql.YieldTermStructureHandle):
+            return curve
+        return ql.YieldTermStructureHandle(curve)
+
     def set_swap_curve(
         self,
         key: SwapCurveKey,
         curve: ql.YieldTermStructure | ql.YieldTermStructureHandle,
     ) -> None:
-        """Register a swap curve (reserved for future use)."""
-        if isinstance(curve, ql.YieldTermStructureHandle):
-            self._swap_curves[key] = curve
-        else:
-            self._swap_curves[key] = ql.YieldTermStructureHandle(curve)
+        """Register a swap par curve under *key*."""
+        if not isinstance(key, SwapCurveKey):
+            raise TypeError(f"Expected SwapCurveKey, got {type(key).__name__}")
+        self._swap_curves[key] = self._as_handle(curve)
 
     def swap_curve(self, key: SwapCurveKey) -> ql.YieldTermStructureHandle:
-        """Return a swap curve handle.
-
-        Raises
-        ------
-        NotImplementedError
-            When swap-curve construction is not yet wired up and *key* is absent.
-        KeyError
-            When no curve has been registered for *key*.
-        """
+        """Return the swap curve handle for *key*; ``KeyError`` when absent."""
         try:
             return self._swap_curves[key]
         except KeyError as exc:
-            raise NotImplementedError(
-                f"Swap curves are not implemented yet (requested {key!r} "
-                f"as of {self.as_of})"
-            ) from exc
+            raise KeyError(f"No swap curve {key} as of {self.as_of}") from exc
 
     def swap_curve_keys(self) -> list[SwapCurveKey]:
         """Registered swap curve keys."""
         return list(self._swap_curves.keys())
 
+    def set_repo_curve(
+        self,
+        key: RepoCurveKey,
+        curve: ql.YieldTermStructure | ql.YieldTermStructureHandle,
+    ) -> None:
+        """Register a repo/funding curve under *key*."""
+        if not isinstance(key, RepoCurveKey):
+            raise TypeError(f"Expected RepoCurveKey, got {type(key).__name__}")
+        self._repo_curves[key] = self._as_handle(curve)
+
+    def repo_curve(self, key: RepoCurveKey) -> ql.YieldTermStructureHandle:
+        """Return the repo curve handle for *key*; ``KeyError`` when absent."""
+        try:
+            return self._repo_curves[key]
+        except KeyError as exc:
+            raise KeyError(f"No repo curve {key} as of {self.as_of}") from exc
+
+    def repo_curve_keys(self) -> list[RepoCurveKey]:
+        """Registered repo curve keys."""
+        return list(self._repo_curves.keys())
+
     def __or__(self, other: QuantLibCurveCollection) -> QuantLibCurveCollection:
         """Merge two collections with the same ``as_of`` date.
 
-        Bond and swap curve dicts are combined; *other* wins on duplicate keys.
+        Bond, swap and repo curve dicts are combined; *other* wins on duplicate keys.
         """
         if not isinstance(other, QuantLibCurveCollection):
             return NotImplemented
@@ -251,6 +269,7 @@ class QuantLibCurveCollection:
             as_of=self.as_of,
             _bond_curves={**self._bond_curves, **other._bond_curves},
             _swap_curves={**self._swap_curves, **other._swap_curves},
+            _repo_curves={**self._repo_curves, **other._repo_curves},
         )
 
     def __ror__(self, other: QuantLibCurveCollection) -> QuantLibCurveCollection:
@@ -405,6 +424,9 @@ class QuantlibMarketContext:
         default_factory=dict, repr=False
     )
     fx_rates: dict[str, FXC] = field(default_factory=dict)
+    curve_diagnostics: dict[tuple[str, SwapCurveKey | RepoCurveKey], pl.DataFrame] = field(
+        default_factory=dict, repr=False
+    )
 
     def set_curve_collection(
         self,
@@ -472,6 +494,62 @@ class QuantlibMarketContext:
             self.set_curve_collection(collection, label=label, curve_options=curve_options)
 
         return curve_handle
+
+    def _rate_curve_collection(self, label: str) -> QuantLibCurveCollection:
+        if self.as_of is None:
+            raise ValueError("Cannot build a curve before the context as_of date is set")
+        if label not in self.curve_collections:
+            self.set_curve_collection(QuantLibCurveCollection(as_of=self.as_of), label=label)
+        return self.curve_collections[label]
+
+    def ensure_repo_curve(
+        self,
+        key: RepoCurveKey,
+        db_path: str | Path | None = None,
+    ) -> ql.YieldTermStructureHandle:
+        """Build and register the repo curve for *key* under ``REPO_RFR`` when absent."""
+        collection = self._rate_curve_collection(REPO_RFR_LABEL)
+        if key in collection.repo_curve_keys():
+            return collection.repo_curve(key)
+        val_date = _as_of_date(self.as_of)
+        db = db_path if db_path is not None else get_settings().ycs_db_path
+        handle, diag = ql_build_repo_curve(key, val_date, load_repo_rates(db, key, val_date))
+        collection.set_repo_curve(key, handle)
+        self.curve_diagnostics[(REPO_RFR_LABEL, key)] = diag
+        return handle
+
+    def ensure_swap_curve(
+        self,
+        key: SwapCurveKey,
+        db_path: str | Path | None = None,
+    ) -> ql.YieldTermStructureHandle:
+        """Build and register the swap curve for *key* under ``SWAP_PAR`` when absent.
+
+        Swaps are discounted off the same-currency repo curve (dual-curve). When
+        no repo quotes exist for the currency/date, the curve self-discounts and
+        its diagnostics carry ``discounting="self"``.
+        """
+        collection = self._rate_curve_collection(SWAP_PAR_LABEL)
+        if key in collection.swap_curve_keys():
+            return collection.swap_curve(key)
+        val_date = _as_of_date(self.as_of)
+        db = db_path if db_path is not None else get_settings().ycs_db_path
+        rates_df = load_swap_rates(db, key, val_date)
+        discount = None
+        repo_keys = [
+            k
+            for k in list_rate_curve_keys(db, REPO_TABLE, val_date, key.currency)
+            if k.index == key.index
+        ]
+        if repo_keys:
+            try:
+                discount = self.ensure_repo_curve(repo_keys[0], db)
+            except LookupError:
+                discount = None
+        handle, diag = ql_build_swap_curve(key, val_date, rates_df, discount)
+        collection.set_swap_curve(key, handle)
+        self.curve_diagnostics[(SWAP_PAR_LABEL, key)] = diag
+        return handle
 
     def curve_collection(self, label: str = "default") -> QuantLibCurveCollection:
         try:

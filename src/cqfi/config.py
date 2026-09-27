@@ -194,6 +194,8 @@ class DatasetConfig:
 _INPUT_KEYWORDS = (
     "zero rate", "par rate", "spotfx", "window_corr", "correlation", "spread",
     "slope", "ycs_data", "treasury curve", "yield curve",
+    "swap rate", "swap curve", "swap par", "repo rate", "repo curve", "rfr",
+    "swap_par_rates", "repo_rfr_rates",
 )
 _CACHE_KEYWORDS = (
     "cmt", "clean price", "cached", "pricing run", "calculation_log",

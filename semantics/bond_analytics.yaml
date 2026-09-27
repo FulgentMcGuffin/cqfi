@@ -84,6 +84,45 @@ vocabulary:
     SWE: EUR
     NOR: NOK
     NZL: NZD
+  # Natural-language tenor -> tenor column name. Naming convention:
+  # "Y" + zero-padded years, "p" replaces the decimal point
+  # (e.g. 0.5Y -> Y000p5, 5Y -> Y005p0, 10Y -> Y010p0, 30Y -> Y030p0).
+  tenors:
+    "3M": Y000p25
+    "6M": Y000p5
+    "1Y": Y001p0
+    "1.5Y": Y001p5
+    "18M": Y001p5
+    "2Y": Y002p0
+    "24M": Y002p0
+    "2.5Y": Y002p5
+    "30M": Y002p5
+    "3Y": Y003p0
+    "36M": Y003p0
+    "3.5Y": Y003p5
+    "42M": Y003p5
+    "4Y": Y004p0
+    "48M": Y004p0
+    "4.5Y": Y004p5
+    "54M": Y004p5
+    "5Y": Y005p0
+    "6Y": Y006p0
+    "7Y": Y007p0
+    "8Y": Y008p0
+    "9Y": Y009p0
+    "10Y": Y010p0
+    "11Y": Y011p0
+    "12Y": Y012p0
+    "13Y": Y013p0
+    "14Y": Y014p0
+    "15Y": Y015p0
+    "16Y": Y016p0
+    "17Y": Y017p0
+    "18Y": Y018p0
+    "19Y": Y019p0
+    "20Y": Y020p0
+    "25Y": Y025p0
+    "30Y": Y030p0    
 
 conventions:  
   date: >
@@ -92,6 +131,11 @@ conventions:
   prices: >
     clean_price is per 100 face value. yield_pct and input_rate_pct /
     curve_zero_pct are expressed in percent (e.g. 4.25 means 4.25%). 100 basis points (abbreviated as bps or bp) is equal to 1%.
+  active: >
+    an active bond is a bond whose maturity date is greater than the settlement date when traded at a reference date (if not specified, the reference date is the current date)
+  expired: >
+    an expired bond is a bond whose maturity date is less than or equal to the trade date (if not specified, the trade date is the current date)
+
 
 tables:
   tenor_pillars:

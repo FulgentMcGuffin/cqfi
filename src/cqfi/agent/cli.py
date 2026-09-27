@@ -60,17 +60,24 @@ from cqfi.cli_tools import (
     compute_bond_future_analytics_lc_tool,
     compute_cmt_analytics,
     compute_cmt_analytics_lc_tool,
+    execute_curve_command,
     execute_dlv_command,
     execute_fut_command,
     execute_parsed_calc,
     format_calc_result,
+    format_curve_result,
     format_dlv_result,
     format_fut_result,
     get_bond,
     get_bond_lc_tool,
+    get_curve,
+    get_curve_lc_tool,
+    list_curves,
+    list_curves_lc_tool,
     parse_calc_command,
     resolve_bond_mentions,
 )
+from cqfi.db_backend import DUCKDB_SUFFIX
 from cqfi.delivery_basket import parse_dlv_command, parse_fut_command
 
 # Real, executable LangChain tools bound into SQLAgent/LLMPlanner alongside the
@@ -83,6 +90,8 @@ EXTRA_TOOLS = [
     compute_cmt_analytics_lc_tool,
     build_delivery_basket_lc_tool,
     compute_bond_future_analytics_lc_tool,
+    get_curve_lc_tool,
+    list_curves_lc_tool,
 ]
 
 # Tool names handled locally by _run_tool_calls rather than by the MCP server.
@@ -93,6 +102,8 @@ LOCAL_TOOL_NAMES = [
     "compute_cmt_analytics",
     "build_delivery_basket",
     "compute_bond_future_analytics",
+    "get_curve",
+    "list_curves",
 ]
 
 
@@ -121,6 +132,13 @@ HELP_TEXT_CQFI = (
     "              /mctx 2024-02-15 USA\n"
     "              /mctx 2025-11-18\n"
     '    Also available in LLM mode: "Is there a market for France on 17 Feb 2022?"\n'
+    "\n"
+    "Curve commands:\n"
+    "  /curve <bond|bond_par|swap|repo> <name> <YYYY-MM-DD>  — show/plot a curve's pillars\n"
+    "  /curve list [YYYY-MM-DD]  — list available swap and repo curves\n"
+    "    Examples: /curve swap USD 2024-01-02\n"
+    "              /curve repo EUR 2024-01-02\n"
+    '    Also available in LLM mode: "Plot the EUR swap and repo curves on 2 Jan 2024"\n'
     "\n"
     "Bond commands:\n"
     "  /bond <id>  — show bond_universe row as JSON (user_friendly_id or bond_id)\n"
@@ -260,12 +278,14 @@ _MCTX_HELP_TEXT = (
     "\n"
     "Arguments: /mctx <date> [issuer] [curve_label]\n"
     "  <date>: YYYY-MM-DD (required)\n"
-    "  [issuer]: Optional issuer code (e.g., USA, DEU, FRA). If omitted, checks all issuers.\n"
-    "  [curve_label]: Optional curve type (BOND_ZERO or BOND_PAR). Defaults to BOND_ZERO.\n"
+    "  [issuer]: Optional issuer code (e.g., USA, DEU, FRA), or a currency (USD, EUR) for\n"
+    "            SWAP_PAR / REPO_RFR. If omitted, checks all issuers.\n"
+    "  [curve_label]: Optional curve type: BOND_ZERO (default), BOND_PAR, SWAP_PAR or REPO_RFR.\n"
     "\n"
     "Examples:\n"
     "  /mctx 2024-02-15 FRA      — Check France market on Feb 15, 2024\n"
     "  /mctx 2024-02-15          — Check all markets on Feb 15, 2024\n"
+    "  /mctx 2024-02-15 USD SWAP_PAR — Build the USD swap curve on Feb 15, 2024\n"
 )
 
 _CACHE_HELP_TEXT = (
@@ -453,8 +473,10 @@ def _render(result: Any) -> str:
 def mcp_settings_for(app: AppSettings, target: str) -> MCPSettings:
     """Build MCP connection settings for a registered dataset (see AppSettings.mcp_datasets)."""
     cfg = app.mcp_datasets[target]
+    db_type = "duckdb" if str(cfg.db_path).lower().endswith(DUCKDB_SUFFIX) else "sqlite"
     return MCPSettings(
         transport="stdio",
+        db_type=db_type,
         db_path=cfg.db_path,
         dataset=cfg.dataset,
         semantics_dir=cfg.semantics_dir,
@@ -719,6 +741,18 @@ async def _run_tool_calls(client: DBClient, calls: list[ToolCall]) -> None:
                 print(f"Tool error: {exc}")
             continue
 
+        if call.name in ("get_curve", "list_curves"):
+            try:
+                func = get_curve if call.name == "get_curve" else list_curves
+                result = func(**call.arguments)
+                if result.get("status") == "success":
+                    print(f"{result['message']}\n{pl.DataFrame(result['rows'], schema=result['columns'])}")
+                else:
+                    print(_render(result))
+            except Exception as exc:
+                print(f"Tool error: {exc}")
+            continue
+
         if call.name == "get_bond":
             try:
                 result = get_bond(call.arguments.get("bond_id", ""))
@@ -794,8 +828,13 @@ async def _run_tool_calls(client: DBClient, calls: list[ToolCall]) -> None:
 
 
 def _handle_bond_future_commands(text: str) -> bool:
-    """Execute /dlv or /fut locally. Returns True when one of them handled *text*."""
+    """Execute /dlv, /fut or /curve locally. Returns True when one of them handled *text*."""
     try:
+        curve_result = execute_curve_command(text)
+        if curve_result is not None:
+            print(format_curve_result(curve_result))
+            return True
+
         dlv_result = execute_dlv_command(text)
         if dlv_result is not None:
             print(format_dlv_result(dlv_result))
