@@ -196,6 +196,9 @@ _INPUT_KEYWORDS = (
     "slope", "ycs_data", "treasury curve", "yield curve",
     "swap rate", "swap curve", "swap par", "repo rate", "repo curve", "rfr",
     "swap_par_rates", "repo_rfr_rates",
+    "exchange rate", "fx rate", "fx spot", "spot fx", "fx ", "forex",
+    "gbpusd", "eurusd", "usdjpy", "usdcad", "audusd", "nzdusd", "usdchf",
+    "usdcny", "usdinr", "usdmxn", "usdbrl", "usdrub", "usdkrw",
 )
 _CACHE_KEYWORDS = (
     "cmt", "clean price", "cached", "pricing run", "calculation_log",

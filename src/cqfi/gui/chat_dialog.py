@@ -11,7 +11,7 @@ from pathlib import Path
 import polars as pl
 from matplotlib.ticker import AutoMinorLocator
 from plotnine.exceptions import PlotnineError, PlotnineWarning
-from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QElapsedTimer, QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QShowEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,7 +36,13 @@ from gui_constants import Theme, get_plot_bg, get_theme, window_style
 from gui_settings import load_settings, save_settings
 
 from cqfi.config import AppSettings as CQFIAppSettings
-from gui_utils import FramelessResizeHelper, PanelFrame, RoundedShell, TitleBar
+from gui_utils import (
+    FramelessResizeHelper,
+    PanelFrame,
+    RoundedShell,
+    SmoothScroller,
+    TitleBar,
+)
 from plotnine_wrapper import (
     coerce_date_columns,
     create_ggplot_from_df,
@@ -64,6 +70,7 @@ _READ_ONLY_SQL_RE = re.compile(
 _DATE_VALUE_RE = re.compile(
     r"^\s*(?:"
     r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?"  # ISO / ISO-datetime
+    r"|\d{4}-\d{2}"  # year-month (monthly aggregates), kept as text
     r"|\d{2}/\d{2}/\d{4}"  # US mm/dd/yyyy
     r"|\d{2}\.\d{2}\.\d{4}"  # EU dd.mm.yyyy
     r"|\d{2}-\d{2}-\d{4}"  # EU dd-mm-yyyy
@@ -236,33 +243,46 @@ def extract_markdown_table_with_date_index(text: str) -> pl.DataFrame | None:
     return None
 
 
-def extract_dataframe_from_messages(messages) -> pl.DataFrame | None:
-    """Return the most recent SQL result as a Polars DataFrame, if present."""
+def _message_payloads(msg) -> list[object]:
+    """Candidate tool-result payloads carried by one ToolMessage."""
+    payloads: list[object] = []
+    artifact = getattr(msg, "artifact", None)
+    if isinstance(artifact, dict) and "structured_content" in artifact:
+        payloads.append(artifact["structured_content"])
+
+    content = msg.content
+    if isinstance(content, dict):
+        payloads.append(content)
+    elif isinstance(content, str):
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            return payloads
+        payloads.extend(parsed if isinstance(parsed, list) else [parsed])
+    elif isinstance(content, list):
+        # MCP adapters emit [{"type": "text", "text": "<json>"}] blocks.
+        payloads.extend(
+            block.get("text") if isinstance(block, dict) and "text" in block else block
+            for block in content
+        )
+    return payloads
+
+
+def iter_tool_dataframes(messages):
+    """Yield one DataFrame per SQL-shaped tool result, most recent first."""
     for msg in reversed(messages):
         if type(msg).__name__ != "ToolMessage":
             continue
-
-        content = msg.content
-        payloads: list[object] = []
-        if isinstance(content, dict):
-            payloads = [content]
-        elif isinstance(content, str):
-            try:
-                parsed = json.loads(content)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                payloads = [parsed]
-            elif isinstance(parsed, list):
-                payloads = parsed
-        elif isinstance(content, list):
-            payloads = content
-
-        for data in payloads:
+        for data in _message_payloads(msg):
             df = run_sql_result_to_dataframe(data)
             if df is not None:
-                return df
-    return None
+                yield df
+                break
+
+
+def extract_dataframe_from_messages(messages) -> pl.DataFrame | None:
+    """Return the most recent SQL result as a Polars DataFrame, if present."""
+    return next(iter_tool_dataframes(messages), None)
 
 
 async def fetch_dataframe_for_answer(
@@ -271,22 +291,19 @@ async def fetch_dataframe_for_answer(
     """Build a dataframe from tool messages, a markdown table, or SQL in the answer.
 
     Priority:
-    1. Most recent SQL *tool result* from the agent's ToolMessages — the most
-       reliable source because it comes from an actual DB round-trip.
-    2. Markdown table embedded in the answer text whose first column holds
-       dates/datetimes.  When such a table is found the SQL-extraction step is
-       skipped entirely (the table IS the answer).
+    1. A date/month-indexed markdown table in the answer: the LLM's headline
+       result. The most recent tool result with the same row count is returned
+       instead when available (exact DB values rather than rounded text).
+    2. Most recent non-empty SQL tool result.
     3. SQL statement extracted from the answer text and executed via run_sql.
     """
-    dataframe = extract_dataframe_from_messages(messages)
-    if dataframe is not None and not dataframe.is_empty():
-        return dataframe
-
-    # If the LLM rendered its result as a date-indexed markdown table, use that
-    # directly and skip the SQL-extraction path.
+    tool_dfs = [df for df in iter_tool_dataframes(messages) if not df.is_empty()]
     md_df = extract_markdown_table_with_date_index(answer)
     if md_df is not None:
-        return md_df
+        return next((df for df in tool_dfs if df.height == md_df.height), md_df)
+    if tool_dfs:
+        return tool_dfs[0]
+    dataframe = extract_dataframe_from_messages(messages)
 
     sql = extract_sql_from_text(answer)
     if not sql:
@@ -592,6 +609,12 @@ class ChatDialog(QMainWindow):
         self._theme = get_theme(self._settings.get("ui_theme"))
         self._last_dataframe: pl.DataFrame | None = None
         self._chat_log: list[str] = []
+        self._pending_reply = False
+        self._busy_clock = QElapsedTimer()
+        self._busy_frame = 0
+        self._busy_timer = QTimer(self)
+        self._busy_timer.setInterval(120)
+        self._busy_timer.timeout.connect(self._tick_busy)
 
         self.setWindowTitle("cqfi")
         self.resize(1100, 984)
@@ -663,6 +686,7 @@ class ChatDialog(QMainWindow):
         self._chat_view.setObjectName("chatView")
         self._chat_view.setOpenExternalLinks(True)
         self._chat_view.setPlaceholderText("LLM responses appear here…")
+        self._chat_scroller = SmoothScroller(self._chat_view)
         chat_layout.addWidget(self._chat_view, stretch=1)
 
         chat_panel.set_content(chat_inner)
@@ -857,10 +881,27 @@ class ChatDialog(QMainWindow):
         self._send_btn.setDisabled(busy)
         self._prompt_input.setDisabled(busy)
         self._settings_btn.setDisabled(busy)
-        self._status_label.setText("Thinking…" if busy else "Ready")
+        self._pending_reply = busy
+        if busy:
+            self._busy_clock.start()
+            self._busy_frame = 0
+            self._tick_busy()
+            self._busy_timer.start()
+        else:
+            self._busy_timer.stop()
+            self._status_label.setText("Ready")
+        self._refresh_chat_view()
         self._status_label.setProperty("busy", busy)
         self._status_label.style().unpolish(self._status_label)
         self._status_label.style().polish(self._status_label)
+
+    _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def _tick_busy(self) -> None:
+        frame = self._SPINNER[self._busy_frame % len(self._SPINNER)]
+        self._busy_frame += 1
+        seconds = self._busy_clock.elapsed() // 1000
+        self._status_label.setText(f"{frame}  Thinking… {seconds}s")
 
     def _append_system_message(self, text: str) -> None:
         self._append_chat_block("System", text, muted=True)
@@ -885,10 +926,14 @@ class ChatDialog(QMainWindow):
 
     def _refresh_chat_view(self) -> None:
         scrollbar = self._chat_view.verticalScrollBar()
-        at_bottom = scrollbar.value() >= scrollbar.maximum() - 20
-        self._chat_view.setMarkdown("\n\n---\n\n".join(self._chat_log))
-        if at_bottom:
-            scrollbar.setValue(scrollbar.maximum())
+        position = scrollbar.value()
+        at_bottom = position >= scrollbar.maximum() - 20
+        blocks = list(self._chat_log)
+        if self._pending_reply:
+            blocks.append("*Assistant · working on it…*")
+        self._chat_view.setMarkdown("\n\n---\n\n".join(blocks))
+        # setMarkdown resets the scroll position; keep the reader where they were.
+        scrollbar.setValue(scrollbar.maximum() if at_bottom else position)
 
     def _send_prompt(self) -> None:
         query = self._prompt_input.text().strip()
@@ -901,6 +946,7 @@ class ChatDialog(QMainWindow):
         self._llm_worker.query_requested.emit(query)
 
     def _on_llm_response(self, answer: str, dataframe: object) -> None:
+        self._pending_reply = False
         self._append_assistant_message(answer)
         if isinstance(dataframe, pl.DataFrame):
             dataframe = coerce_date_columns(dataframe)
@@ -910,6 +956,7 @@ class ChatDialog(QMainWindow):
         self._set_busy(False)
 
     def _on_llm_error(self, message: str) -> None:
+        self._pending_reply = False
         self._append_system_message(f"Error: {message}")
         self._set_busy(False)
 

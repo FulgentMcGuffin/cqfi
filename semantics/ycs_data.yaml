@@ -13,8 +13,8 @@ description: >
   (source, date); the tenor columns (Y...) hold the rate for that maturity.
   swap_par_rates holds fixed-for-floating swap par rates and repo_rfr_rates
   holds repo / risk-free funding rates, one row per (ccy, coupon period(s),
-  index, date). spotfx holds spot FX rates. window_corr holds rolling
-  correlations.
+  index, date). spotfx holds spot FX (exchange) rates, one row per date with
+  one column per currency pair. window_corr holds rolling correlations.
   
 
 vocabulary:
@@ -66,6 +66,35 @@ vocabulary:
     NZD: NZD
     CHF: CHF
     CNY: CNY
+  # Natural-language currency / exchange-rate mention -> spotfx column. Every
+  # pair is quoted against USD. "EUR exchange rate", "euro rate" and "EUR/USD"
+  # all use EURUSD; for the inverse quote (EUR per 1 USD) use 1.0 / EURUSD.
+  fx_pairs:
+    EUR: EURUSD
+    euro: EURUSD
+    GBP: GBPUSD
+    sterling: GBPUSD
+    pound: GBPUSD
+    JPY: USDJPY
+    yen: USDJPY
+    CAD: USDCAD
+    AUD: AUDUSD
+    NZD: NZDUSD
+    CHF: USDCHF
+    swiss franc: USDCHF
+    CNY: USDCNY
+    yuan: USDCNY
+    renminbi: USDCNY
+    INR: USDINR
+    rupee: USDINR
+    MXN: USDMXN
+    peso: USDMXN
+    BRL: USDBRL
+    real: USDBRL
+    RUB: USDRUB
+    rouble: USDRUB
+    KRW: USDKRW
+    won: USDKRW
   # Natural-language tenor -> tenor column name. Naming convention:
   # "Y" + zero-padded years, "p" replaces the decimal point
   # (e.g. 0.5Y -> Y000p5, 5Y -> Y005p0, 10Y -> Y010p0, 30Y -> Y030p0).
@@ -137,6 +166,13 @@ conventions:
     swap par rates price derivatives, repo rates are funding/financing rates.
     A swap-repo spread joins the two tables on date and ccy. Rows where every
     tenor column is NULL mean no quote that day.
+  fx: >
+    spotfx has one column per currency pair (named BASEQUOTE, e.g. EURUSD = USD
+    per 1 EUR, USDJPY = JPY per 1 USD); there is no currency column, so pick the
+    column from the fx_pairs vocabulary and never filter on spotfx.source. An
+    "exchange rate" for a non-USD currency means its pair against USD. For a
+    cross rate (e.g. EURGBP) divide the two USD pairs: EURUSD / GBPUSD. "Latest"
+    means the most recent date with a non-NULL value for that column.
 
 tables:
   zero_rates:
@@ -228,12 +264,15 @@ tables:
       Y025p0: {type: REAL, description: "25-year repo rate."}
       Y030p0: {type: REAL, description: "30-year repo rate."}
   spotfx:
-    description: Spot FX rates per source and date.
+    description: >
+      Spot FX (exchange) rates, one row per date with one column per currency
+      pair quoted against USD. Use for any exchange rate / FX / currency
+      conversion question.
     columns:
       date: {type: TEXT, description: "Observation date (YYYY-MM-DD)."}
       source: {type: TEXT, description: "the type of data held by this table (spot_fx_rates), do not use this column"}
       GBPUSD: {type: REAL, description: "FX spot rate for converting USD to GBP (how much USD is needed for 1 GBP)"}
-      EURUSD: {type: REAL, description: "FX spot rate for converting USD to GBP (how much USD is needed for 1 EUR)"}
+      EURUSD: {type: REAL, description: "EUR/USD spot exchange rate (how much USD is needed for 1 EUR)"}
       USDJPY: {type: REAL, description: "FX spot rate for converting JPY to USD (how much JPY is needed for 1 USD)"}
       USDCAD: {type: REAL, description: "FX spot rate for converting CAD to USD (how much CAD is needed for 1 USD)"}
       AUDUSD: {type: REAL, description: "FX spot rate for converting USD to AUD (how much USD is needed for 1 AUD)"}
@@ -290,3 +329,21 @@ examples:
       FROM swap_par_rates s
       JOIN repo_rfr_rates r ON r.date = s.date AND r.ccy = s.ccy
       WHERE s.ccy = 'EUR' AND s.date = '2024-01-02'
+  - q: "What is the latest EUR exchange rate?"
+    sql: >
+      SELECT date, EURUSD
+      FROM spotfx
+      WHERE EURUSD IS NOT NULL
+      ORDER BY date DESC
+      LIMIT 1
+  - q: "USD/JPY exchange rate over 2024"
+    sql: >
+      SELECT date, USDJPY
+      FROM spotfx
+      WHERE date >= '2024-01-01' AND date <= '2024-12-31'
+      ORDER BY date
+  - q: "EURGBP cross rate on 2024-01-02"
+    sql: >
+      SELECT date, EURUSD / GBPUSD AS EURGBP
+      FROM spotfx
+      WHERE date = '2024-01-02'

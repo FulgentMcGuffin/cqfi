@@ -1,6 +1,16 @@
-from PySide6.QtCore import Qt, QRect, QRectF, QPoint, QEvent
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QObject,
+    QPoint,
+    QPropertyAnimation,
+    QRect,
+    QRectF,
+    Qt,
+)
 from PySide6.QtGui import QCursor, QColor, QPainter, QPainterPath, QRegion
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
@@ -281,3 +291,41 @@ class TitleBar(QWidget):
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
         super().mouseReleaseEvent(event)
+
+
+class SmoothScroller(QObject):
+    """Animate mouse-wheel scrolling on a scroll area's vertical scrollbar.
+
+    Each wheel notch moves the target by ``step`` pixels and eases there over
+    ``duration_ms``; notches arriving mid-animation extend the same target, so
+    fast spins glide instead of stuttering. Touchpad (pixel-delta) events are
+    left to Qt, which already scrolls them smoothly.
+    """
+
+    def __init__(self, area: QAbstractScrollArea, step: int = 90, duration_ms: int = 220):
+        super().__init__(area)
+        self._bar = area.verticalScrollBar()
+        self._step = step
+        self._target = self._bar.value()
+        self._anim = QPropertyAnimation(self._bar, b"value", self)
+        self._anim.setDuration(duration_ms)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        area.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt override)
+        if event.type() != QEvent.Type.Wheel or not event.pixelDelta().isNull():
+            return False
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            return False  # leave ctrl+wheel zoom alone
+        notches = event.angleDelta().y() / 120.0
+        if not notches:
+            return False
+        start = self._target if self._anim.state() == QPropertyAnimation.State.Running else self._bar.value()
+        self._target = max(
+            self._bar.minimum(), min(self._bar.maximum(), round(start - notches * self._step))
+        )
+        self._anim.stop()
+        self._anim.setStartValue(self._bar.value())
+        self._anim.setEndValue(self._target)
+        self._anim.start()
+        return True

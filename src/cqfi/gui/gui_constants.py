@@ -583,37 +583,40 @@ QPushButton:default:hover {{
     border-color: {primary_hover};
 }}
 QScrollBar:vertical {{
-    background-color: {t.bg};
-    width: 12px;
-    margin: 0px;
+    background: transparent;
+    width: 8px;
+    margin: 4px 2px 4px 0px;
     border: none;
 }}
 QScrollBar::handle:vertical {{
     background-color: {t.border};
-    border-radius: 6px;
-    min-height: 40px;
-    margin: 3px;
+    border-radius: 3px;
+    min-height: 32px;
 }}
-QScrollBar::handle:vertical:hover {{
+QScrollBar::handle:vertical:hover, QScrollBar::handle:vertical:pressed {{
     background-color: {primary};
 }}
 QScrollBar:horizontal {{
-    background-color: {t.bg};
-    height: 12px;
-    margin: 0px;
+    background: transparent;
+    height: 8px;
+    margin: 0px 4px 2px 4px;
     border: none;
 }}
 QScrollBar::handle:horizontal {{
     background-color: {t.border};
-    border-radius: 6px;
-    min-width: 40px;
-    margin: 3px;
+    border-radius: 3px;
+    min-width: 32px;
 }}
-QScrollBar::handle:horizontal:hover {{
+QScrollBar::handle:horizontal:hover, QScrollBar::handle:horizontal:pressed {{
     background-color: {primary};
 }}
 QScrollBar::add-line, QScrollBar::sub-line {{
     border: none;
+    background: none;
+    width: 0px;
+    height: 0px;
+}}
+QScrollBar::add-page, QScrollBar::sub-page {{
     background: none;
 }}
 """

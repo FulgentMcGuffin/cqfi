@@ -1,3 +1,4 @@
+import logging
 import re
 
 import polars as pl
@@ -15,6 +16,10 @@ from plotnine import (
     ggplot, aes, ggtitle, ylab, theme, element_text, element_line,
     coord_flip, after_stat,
 )
+
+# theme_xkcd requests "Humor Sans"/"xkcd" fonts; when absent matplotlib logs
+# one findfont warning per text element before falling back to a default font.
+logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
 PLOT9_THEMES_DICT = {
     "538": theme_538,
