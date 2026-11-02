@@ -478,7 +478,7 @@ QLabel#titleLabel {{
     background: transparent;
     letter-spacing: -0.3px;
 }}
-QPushButton#closeBtn {{
+QPushButton#closeBtn, QPushButton#minBtn {{
     background: transparent;
     color: {t.text_muted};
     border: none;
@@ -489,7 +489,11 @@ QPushButton#closeBtn {{
     min-width: 34px;
     font-weight: 600;
 }}
-QPushButton#closeBtn:pressed {{
+QPushButton#minBtn:hover {{
+    background-color: {t.border};
+    color: {t.text};
+}}
+QPushButton#closeBtn:pressed, QPushButton#minBtn:pressed {{
     background-color: {t.bg};
 }}
 QLineEdit, QDoubleSpinBox, QSpinBox {{

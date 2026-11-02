@@ -16,6 +16,7 @@ dependencies = [
     "pyside6>=6.11.1",
     "anthropic>=0.112.0",
     "decorules",
+    "prompt-toolkit>=3.0.53",
 ]
 
 [project.scripts]

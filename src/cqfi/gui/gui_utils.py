@@ -43,6 +43,14 @@ class FramelessResizeHelper:
         if app is not None:
             app.installEventFilter(self._window)
 
+    def uninstall(self) -> None:
+        """Detach the app-wide filter so a closed window stops seeing every event."""
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self._window)
+
     def hit_test(self, pos: QPoint) -> str | None:
         x, y = pos.x(), pos.y()
         w, h = self._window.width(), self._window.height()
@@ -224,6 +232,7 @@ class TitleBar(QWidget):
         parent=None,
         trailing: QWidget | None = None,
         subtitle: str = "",
+        minimizable: bool = False,
     ):
         super().__init__(parent)
         self._window = window
@@ -261,6 +270,14 @@ class TitleBar(QWidget):
 
         if trailing is not None:
             layout.addWidget(trailing)
+
+        if minimizable:
+            min_btn = QPushButton("\u2013")
+            min_btn.setObjectName("minBtn")
+            min_btn.setFixedSize(34, 34)
+            min_btn.setToolTip("Minimize")
+            min_btn.clicked.connect(window.showMinimized)
+            layout.addWidget(min_btn)
 
         close_btn = QPushButton("\u2715")
         close_btn.setObjectName("closeBtn")

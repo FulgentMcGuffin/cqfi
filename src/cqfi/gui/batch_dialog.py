@@ -524,7 +524,11 @@ class _BaseBatchWindow(QMainWindow):
 
         self.setWindowTitle(self._WINDOW_TITLE)
         self.resize(1200, 820)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+        )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         outer = QWidget()
@@ -539,7 +543,13 @@ class _BaseBatchWindow(QMainWindow):
         shell_layout.setContentsMargins(0, 0, 0, 0)
         shell_layout.setSpacing(0)
         shell_layout.addWidget(
-            TitleBar(self, self._WINDOW_TITLE, shell, subtitle="Batch analytics progress")
+            TitleBar(
+                self,
+                self._WINDOW_TITLE,
+                shell,
+                subtitle="Batch analytics progress",
+                minimizable=True,
+            )
         )
 
         content = QWidget()
@@ -617,7 +627,9 @@ class _BaseBatchWindow(QMainWindow):
         QApplication.clipboard().setText(text)
 
     def eventFilter(self, watched, event):
-        if self._resize_helper.handle_event_filter(watched, event):
+        # getattr: the app-wide filter can fire on a window mid-teardown
+        helper = getattr(self, "_resize_helper", None)
+        if helper is not None and helper.handle_event_filter(watched, event):
             return True
         return super().eventFilter(watched, event)
 
@@ -699,6 +711,7 @@ class _BaseBatchWindow(QMainWindow):
             return
         if self._thread is not None and self._thread.isRunning():
             self._thread.wait(5000)
+        self._resize_helper.uninstall()
         super().closeEvent(event)
 
 

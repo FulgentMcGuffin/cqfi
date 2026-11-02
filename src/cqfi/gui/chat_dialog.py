@@ -320,6 +320,55 @@ async def fetch_dataframe_for_answer(
     return dataframe
 
 
+MEMORY_TURNS = 5  # recent turns kept for the LLM
+_MEMORY_SQL_CHARS = 350
+_MEMORY_ANSWER_CHARS = 200
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def summarize_turn(
+    query: str, target: str, answer: str, messages, dataframe: pl.DataFrame | None
+) -> str:
+    """Compact, bounded recap of one turn: question, SQL run, answer gist, data shape/range."""
+    sqls = [
+        str(call.get("args", {}).get("sql", ""))
+        for msg in messages or []
+        for call in getattr(msg, "tool_calls", None) or []
+        if call.get("name") == "run_sql"
+    ]
+    parts = [f"Q: {_clip(query, 200)} [dataset: {target}]"]
+    if sqls:
+        parts.append(f"SQL: {_clip(sqls[-1], _MEMORY_SQL_CHARS)}")
+    parts.append(f"A: {_clip(answer, _MEMORY_ANSWER_CHARS)}")
+    if dataframe is not None and not dataframe.is_empty():
+        first = dataframe.columns[0]
+        span = ""
+        try:
+            span = f", {first} {dataframe[first].min()} to {dataframe[first].max()}"
+        except Exception:  # unorderable first column
+            pass
+        parts.append(
+            f"Plotted/tabled: {dataframe.height} rows x columns {dataframe.columns}{span}"
+        )
+    return "\n".join(parts)
+
+
+def memory_preamble(memory: list[str]) -> str:
+    """Prefix for the next prompt; empty when there is nothing to recall."""
+    if not memory:
+        return ""
+    return (
+        "Context — recent turns in this chat (reference only; re-run SQL to get the data, "
+        "answer only the new request below):\n"
+        + "\n---\n".join(memory)
+        + "\n\nNew request: "
+    )
+
+
 class LlmWorker(QObject):
     """Runs mcp_data LLM agent queries on a background thread.
 
@@ -342,6 +391,7 @@ class LlmWorker(QObject):
     def __init__(self, app_settings) -> None:
         super().__init__()
         self._app_settings = app_settings
+        self._memory: list[str] = []  # recent turn summaries (see summarize_turn)
         self.query_requested.connect(self.run_query)
 
     @Slot(str)
@@ -380,6 +430,11 @@ class LlmWorker(QObject):
         )
 
         text = query.strip()
+
+        ctx_reply = self._handle_ctx_command(text)
+        if ctx_reply is not None:
+            self.finished.emit(ctx_reply, None)
+            return
 
         cache_result = handle_runtime_toggle_commands(text)
         if cache_result is not None:
@@ -560,8 +615,24 @@ class LlmWorker(QObject):
         finally:
             loop.close()
 
+    def _handle_ctx_command(self, text: str) -> str | None:
+        """``/ctx`` shows the recap sent to the LLM; ``/ctx clear`` forgets it."""
+        parts = text.lower().split()
+        if not parts or parts[0] != "/ctx":
+            return None
+        if parts[1:] == ["clear"]:
+            self._memory.clear()
+            return "LLM chat context cleared."
+        if len(parts) > 1:
+            return "Usage: /ctx (show recap sent to the LLM) or /ctx clear"
+        if not self._memory:
+            return "No chat context stored yet."
+        return f"Last {len(self._memory)} turn(s) sent to the LLM:\n\n" + "\n\n".join(
+            self._memory
+        )
+
     async def _execute(self, query: str) -> tuple[str, pl.DataFrame | None]:
-        from cqfi.agent.cli import EXTRA_TOOLS, mcp_settings_for, route_query
+        from cqfi.agent.cli import EXTRA_TOOLS, build_llm, mcp_settings_for, route_query
         from cqfi.cli_tools import resolve_bond_mentions
         from mcp_data.client.agent import SQLAgent
         from mcp_data.client.session import DBClient
@@ -588,14 +659,53 @@ class LlmWorker(QObject):
                 profile.get("prompt") if isinstance(profile, dict) else None
             )
             agent = SQLAgent(
-                client, profile_prompt=profile_prompt, extra_tools=EXTRA_TOOLS
+                client,
+                model=build_llm(self._app_settings),
+                profile_prompt=profile_prompt,
+                extra_tools=EXTRA_TOOLS,
             )
-            result = await agent.run(routed.text)
+            result = await agent.run(memory_preamble(self._memory) + routed.text)
             answer = result.answer or "(no answer)"
             dataframe = await fetch_dataframe_for_answer(
                 client, answer, result.messages
             )
+            self._memory.append(
+                summarize_turn(routed.text, routed.target, answer, result.messages, dataframe)
+            )
+            del self._memory[:-MEMORY_TURNS]
             return answer, dataframe
+
+
+class HistoryLineEdit(QLineEdit):
+    """QLineEdit with shell-style Up/Down recall of previously submitted text."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._history: list[str] = []
+        self._pos = 0  # == len(_history) means "live" (not browsing)
+        self._draft = ""
+
+    def add_history(self, text: str) -> None:
+        """Record *text* (skipping consecutive duplicates) and reset browsing."""
+        if text and (not self._history or self._history[-1] != text):
+            self._history.append(text)
+        self._pos = len(self._history)
+
+    def keyPressEvent(self, event) -> None:
+        key = event.key()
+        if key not in (Qt.Key_Up, Qt.Key_Down):
+            return super().keyPressEvent(event)
+        if key == Qt.Key_Up and self._pos > 0:
+            if self._pos == len(self._history):
+                self._draft = self.text()
+            self._pos -= 1
+        elif key == Qt.Key_Down and self._pos < len(self._history):
+            self._pos += 1
+        else:
+            return
+        self.setText(
+            self._history[self._pos] if self._pos < len(self._history) else self._draft
+        )
 
 
 class ChatDialog(QMainWindow):
@@ -618,7 +728,11 @@ class ChatDialog(QMainWindow):
 
         self.setWindowTitle("cqfi")
         self.resize(1100, 984)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+        )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         outer = QWidget()
@@ -643,6 +757,7 @@ class ChatDialog(QMainWindow):
                 shell,
                 trailing=self._settings_btn,
                 subtitle="Natural language data queries",
+                minimizable=True,
             )
         )
 
@@ -670,7 +785,7 @@ class ChatDialog(QMainWindow):
 
         prompt_row = QHBoxLayout()
         prompt_row.setSpacing(10)
-        self._prompt_input = QLineEdit()
+        self._prompt_input = HistoryLineEdit()
         self._prompt_input.setObjectName("promptInput")
         self._prompt_input.setPlaceholderText("Ask a question about your data…")
         self._prompt_input.returnPressed.connect(self._send_prompt)
@@ -940,6 +1055,7 @@ class ChatDialog(QMainWindow):
         if not query:
             return
 
+        self._prompt_input.add_history(query)
         self._prompt_input.clear()
         self._append_user_message(query)
         self._set_busy(True)

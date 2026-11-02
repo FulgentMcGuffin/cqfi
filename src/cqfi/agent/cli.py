@@ -21,6 +21,8 @@ import asyncio
 import re
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -470,6 +472,13 @@ def _render(result: Any) -> str:
     return str(result)
 
 
+def build_llm(app: AppSettings):
+    """Return the configured Anthropic chat model (``llm.model`` / ``CQFI_LLM_MODEL``)."""
+    from mcp_data.client.anthropic import create_anthropic_chat
+
+    return create_anthropic_chat(app.llm_model)
+
+
 def mcp_settings_for(app: AppSettings, target: str) -> MCPSettings:
     """Build MCP connection settings for a registered dataset (see AppSettings.mcp_datasets)."""
     cfg = app.mcp_datasets[target]
@@ -710,8 +719,61 @@ def _execute_future_batch_command(parsed: BatchCommandResult) -> str:
     return "Batch analytics window closed."
 
 
+_ID_TOKEN_RE = re.compile(r"[\w.\-]+")
+
+
+def _future_codes() -> frozenset[str]:
+    """Lower-cased canonical/synonym/Bloomberg codes of every bond-future convention."""
+    from cqfi.bond_futures import BOND_FUTURE_CONVENTIONS
+
+    return frozenset(
+        code.lower()
+        for convention in BOND_FUTURE_CONVENTIONS.values()
+        for code in convention.all_codes()
+    )
+
+
+@lru_cache(maxsize=4)
+def _bond_ids(db_path: str, mtime_ns: int) -> frozenset[str]:
+    """Lower-cased ``user_friendly_id`` and ``bond_id`` values in ``bond_universe``."""
+    from cqfi.db_backend import source_class_for
+
+    sql = "SELECT user_friendly_id, bond_id FROM bond_universe"
+    with source_class_for(db_path)(db_path, read_only=True) as db:
+        frame = db.run_query(sql)
+    return frozenset(
+        str(v).lower() for col in frame.get_columns() for v in col.drop_nulls()
+    )
+
+
+def _bond_analytics_ids(app: AppSettings) -> frozenset[str]:
+    """All identifiers that point at bond_analytics data; empty if the DB is unreadable."""
+    ids = _future_codes()
+    path = app.bond_analytics_db_path
+    try:
+        ids |= _bond_ids(str(path), path.stat().st_mtime_ns)
+    except Exception:  # missing/locked DB: fall back to futures codes + keywords
+        pass
+    return ids
+
+
+def _mentions_known_id(app: AppSettings, lowered: str) -> bool:
+    """True when a query token is a bond/future id (dated contracts like FOATH6 included)."""
+    from cqfi.bond_futures import _split_contract_code
+
+    ids = _bond_analytics_ids(app)
+    for token in _ID_TOKEN_RE.findall(lowered):
+        if len(token) < 2:
+            continue
+        if token in ids:
+            return True
+        if _split_contract_code(token.upper())[1] is not None:  # dated: fgbmh6
+            return True
+    return False
+
+
 def route_query(app: AppSettings, text: str) -> RoutedQuery | None:
-    """Parse an explicit `<dataset>:` prefix or infer the dataset from keywords."""
+    """Parse an explicit `<dataset>:` prefix or infer the dataset from ids, then keywords."""
     lowered = text.strip().lower()
 
     for name in app.mcp_datasets:
@@ -721,6 +783,10 @@ def route_query(app: AppSettings, text: str) -> RoutedQuery | None:
     for name, cfg in app.mcp_datasets.items():
         if any(h in lowered for h in cfg.keywords):
             return RoutedQuery(name, text)
+
+    # Fallback: a bond / future id (e.g. "FOAT last week") implies bond_analytics.
+    if "bond_analytics" in app.mcp_datasets and _mentions_known_id(app, lowered):
+        return RoutedQuery("bond_analytics", text)
 
     return None
 
@@ -977,7 +1043,10 @@ async def _query_dataset(
             from mcp_data.client.agent import SQLAgent
 
             agent = SQLAgent(
-                client, profile_prompt=profile_prompt, extra_tools=EXTRA_TOOLS
+                client,
+                model=build_llm(app),
+                profile_prompt=profile_prompt,
+                extra_tools=EXTRA_TOOLS,
             )
             result = await agent.run(text)
             print(f"[{target}]\n{result.answer or '(no answer)'}")
@@ -985,7 +1054,9 @@ async def _query_dataset(
 
         if use_single_shot:
             planner: Planner = LLMPlanner(
-                profile_prompt=profile_prompt, extra_tools=EXTRA_TOOLS
+                model=build_llm(app),
+                profile_prompt=profile_prompt,
+                extra_tools=EXTRA_TOOLS,
             )
         else:
             planner = CQFIRulePlanner()
@@ -1171,6 +1242,28 @@ def _handle_local_command(
     return _handle_bond_future_commands(text.strip())
 
 
+HISTORY_LIMIT = 100
+
+
+def _capped_history(path: Path):
+    """Return a ``FileHistory`` at *path*, trimmed on disk to the last ``HISTORY_LIMIT`` entries."""
+    from itertools import islice
+
+    from prompt_toolkit.history import FileHistory
+
+    class _Capped(FileHistory):
+        def load_history_strings(self):
+            return islice(super().load_history_strings(), HISTORY_LIMIT)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    history = _Capped(str(path))
+    kept = list(history.load_history_strings())  # newest first
+    path.write_text("", encoding="utf-8")
+    for entry in reversed(kept):
+        history.store_string(entry)
+    return history
+
+
 async def _interactive(
     app: AppSettings,
     cache_mgr: CacheManager,
@@ -1180,10 +1273,14 @@ async def _interactive(
     force_rule: bool,
 ) -> None:
     print(HELP_TEXT_CQFI)
-    loop = asyncio.get_event_loop()
+    from prompt_toolkit import PromptSession
+
+    session: PromptSession[str] = PromptSession(
+        history=_capped_history(Path.home() / ".cqfi" / "cli_history")
+    )
     while True:
         try:
-            query = await loop.run_in_executor(None, input, "cqfi> ")
+            query = await session.prompt_async("cqfi> ")
         except (EOFError, KeyboardInterrupt):
             print()
             break

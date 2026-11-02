@@ -16,6 +16,8 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "cqfi.yaml"
 DEFAULT_RUNTIME_CONFIG_DIR = Path.home() / ".cqfi"
 DEFAULT_RUNTIME_CONFIG_PATH = DEFAULT_RUNTIME_CONFIG_DIR / "cqfi_runtime.json"
 
+DEFAULT_LLM_MODEL = "claude-sonnet-5"
+
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 
 
@@ -208,6 +210,7 @@ _BOND_ANALYTICS_KEYWORDS = (
     "bond", "duration", "convexity", "z-spread", "asw", "carry", "roll",
     "tenor pillar", "bond_universe", "bond_analytics", "cmt_analytics",
     "isin", "market", "/mctx", "/bond",
+    "analytics", "convention", "future", "basket", "delivery",
 )
 
 
@@ -226,6 +229,7 @@ class AppSettings:
     quant_cache_semantics_path: Path
     sessions_dir: Path
     mcp_datasets: dict[str, DatasetConfig]
+    llm_model: str = DEFAULT_LLM_MODEL
 
     @property
     def ycs_dataset(self) -> str:
@@ -364,6 +368,8 @@ class AppSettings:
             quant_cache_semantics_path=quant_cache_semantics_path,
             sessions_dir=_resolve_path(sessions),
             mcp_datasets=mcp_datasets,
+            llm_model=os.environ.get("CQFI_LLM_MODEL")
+            or str((data.get("llm") or {}).get("model") or DEFAULT_LLM_MODEL),
         )
 
     def ensure_dirs(self) -> None:
