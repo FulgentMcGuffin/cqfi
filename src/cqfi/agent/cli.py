@@ -80,6 +80,7 @@ from cqfi.cli_tools import (
     resolve_bond_mentions,
 )
 from cqfi.db_backend import DUCKDB_SUFFIX
+from cqfi.stats.tools import STATS_FUNCS, STATS_LC_TOOLS
 from cqfi.delivery_basket import parse_dlv_command, parse_fut_command
 
 # Real, executable LangChain tools bound into SQLAgent/LLMPlanner alongside the
@@ -94,6 +95,7 @@ EXTRA_TOOLS = [
     compute_bond_future_analytics_lc_tool,
     get_curve_lc_tool,
     list_curves_lc_tool,
+    *STATS_LC_TOOLS,
 ]
 
 # Tool names handled locally by _run_tool_calls rather than by the MCP server.
@@ -106,6 +108,7 @@ LOCAL_TOOL_NAMES = [
     "compute_bond_future_analytics",
     "get_curve",
     "list_curves",
+    *STATS_FUNCS,
 ]
 
 
@@ -817,6 +820,10 @@ async def _run_tool_calls(client: DBClient, calls: list[ToolCall]) -> None:
                     print(_render(result))
             except Exception as exc:
                 print(f"Tool error: {exc}")
+            continue
+
+        if call.name in STATS_FUNCS:
+            print(_render(STATS_FUNCS[call.name](**call.arguments)))
             continue
 
         if call.name == "get_bond":

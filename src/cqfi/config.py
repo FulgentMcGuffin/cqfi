@@ -201,6 +201,8 @@ _INPUT_KEYWORDS = (
     "exchange rate", "fx rate", "fx spot", "spot fx", "fx ", "forex",
     "gbpusd", "eurusd", "usdjpy", "usdcad", "audusd", "nzdusd", "usdchf",
     "usdcny", "usdinr", "usdmxn", "usdbrl", "usdrub", "usdkrw",
+    "regress", "beta", "covarian", "logistic", "rolling", "probability",
+    "swiss franc", "yen", "sterling",
 )
 _CACHE_KEYWORDS = (
     "cmt", "clean price", "cached", "pricing run", "calculation_log",

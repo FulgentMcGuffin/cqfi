@@ -17,6 +17,7 @@ dependencies = [
     "anthropic>=0.112.0",
     "decorules",
     "prompt-toolkit>=3.0.53",
+    "numpy>=2.5.0",
 ]
 
 [project.scripts]

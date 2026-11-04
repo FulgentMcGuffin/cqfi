@@ -420,6 +420,10 @@ optional repo rate or term structure
 - `get_curve` — build a bond, swap or repo curve and return its pillar table
 (rendered as a table and chart in the GUI)
 - `list_curves` — list the swap and repo curves available (optionally on a date)
+- `linear_regression` / `logistic_regression` — OLS betas or event probabilities between par/zero/swap/repo rates
+and FX series, optionally rolling (default window 20 observations, daily step)
+- `correlation_matrix` / `covariance_matrix` — across several series (Pearson default; Spearman, or
+distance correlation for correlations)
 
 Example prompts:
 
@@ -1111,6 +1115,7 @@ src/cqfi/
   bond_future_calculator.py         — BondFutureCalculator protocol
   day_of_month.py                   — DayOfMonthSpec (reference/delivery day rules)
   cli_tools.py                      — get_bond, check_market_context, compute_bond_analytics, compute_cmt_analytics, build_delivery_basket, compute_bond_future_analytics, get_curve, list_curves, /calc /dlv /fut /curve parsing
+  stats/                            — vectorised numpy kernels (rolling OLS/logit, correlation), series loader, regression/correlation LLM tools
   batch/                            — batch planner, process-pool engines, /batch command parsing
   agent/
     cli.py                          — cqfi REPL, slash commands, query routing

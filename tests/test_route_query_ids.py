@@ -45,6 +45,19 @@ def test_analytics_keyword_routes_to_bond_analytics(app):
     assert _target(app, "show me the FOAT analytics") == "bond_analytics"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "what are the rolling betas of the swiss 10y par rate versus the US 10y par rate?",
+        "what is the correlation matrix of all the 10y par rates for the last month?",
+        "what is the probability of the swiss franc strengthening if the japanese yen weakens over the last year?",
+        "run a logistic regression of chf on yen moves",
+    ],
+)
+def test_stats_questions_route_to_input(app, text):
+    assert _target(app, text) == "input"
+
+
 def test_input_keyword_wins_over_id(app):
     assert _target(app, "show the 3y zero rate") == "input"
 
