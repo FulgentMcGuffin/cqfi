@@ -72,6 +72,7 @@ _ZERO_METHODS = [
     QLZeroInterp.CUBIC_ZERO,
     QLZeroInterp.NATURAL_CUBIC_ZERO,
     QLZeroInterp.MONOTONE_CUBIC_ZERO,
+    QLZeroInterp.CUBIC_SPLINE_REGRESSION,
 ]
 
 
@@ -93,6 +94,43 @@ def test_zero_default_is_cubic_zero() -> None:
     z_default = handle_default.zeroRate(5.0, ql.Compounded, _ISSUER.frequency).rate()
     z_explicit = handle_explicit.zeroRate(5.0, ql.Compounded, _ISSUER.frequency).rate()
     assert abs(z_default - z_explicit) < 1e-12
+
+
+def _zero_pct(handle: ql.YieldTermStructureHandle, years: float) -> float:
+    return handle.zeroRate(years, ql.Compounded, _ISSUER.frequency).rate() * 100.0
+
+
+def test_spline_regression_recovers_cubic_exactly() -> None:
+    """Data lying on a cubic in tenor is reproduced by the regression spline."""
+    t = [1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0]
+    poly = lambda y: 3.0 + 0.10 * y - 0.004 * y**2 + 0.00005 * y**3  # noqa: E731
+    df = pl.DataFrame({"tenor_years": t, "rate_pct": [poly(y) for y in t]})
+    _, diag = ql_build_zero_curve(
+        _ISSUER, _VAL_DATE, df, RateType.ZERO, QLZeroInterp.CUBIC_SPLINE_REGRESSION
+    )
+    # Inputs are continuously compounded; diagnostics are annual-compounded.
+    annual = ((diag["input_rate_pct"] / 100).exp() - 1) * 100
+    assert (diag["curve_zero_pct"] - annual).abs().max() < 0.005
+
+
+def test_spline_regression_smooths_noise() -> None:
+    """A noisy pillar is not interpolated: the curve sits between it and its neighbours."""
+    df = _PAR_DF.with_columns(
+        pl.when(pl.col("tenor_years") == 7.0).then(4.5).otherwise(pl.col("rate_pct")).alias("rate_pct")
+    )
+    handle, _ = ql_build_zero_curve(
+        _ISSUER, _VAL_DATE, df, RateType.ZERO, QLZeroInterp.CUBIC_SPLINE_REGRESSION
+    )
+    assert 3.8 < _zero_pct(handle, 7.0) < 4.5
+
+
+def test_spline_regression_knots_validated() -> None:
+    """Too many interior knots (parameters >= pillars) raises ValueError."""
+    with pytest.raises(ValueError, match="regression_knots"):
+        ql_build_zero_curve(
+            _ISSUER, _VAL_DATE, _ZERO_DF, RateType.ZERO,
+            QLZeroInterp.CUBIC_SPLINE_REGRESSION, regression_knots=2,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +247,7 @@ def test_zero_interp_accepts_string_value(method_str: str) -> None:
 # Cross-type incompatibility — ValueError expected
 # ---------------------------------------------------------------------------
 
-_ZERO_ONLY_METHODS = [QLZeroInterp.MONOTONE_CUBIC_ZERO]
+_ZERO_ONLY_METHODS = [QLZeroInterp.MONOTONE_CUBIC_ZERO, QLZeroInterp.CUBIC_SPLINE_REGRESSION]
 
 _PAR_ONLY_METHODS = [
     QLZeroInterp.KRUGER_ZERO,

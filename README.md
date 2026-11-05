@@ -23,7 +23,7 @@ the GUI) renders tables and charts from the result.
 ### What you can do today
 
 - **QuantLib pricing & analytics** — bootstrap yield curves (19 sovereign issuers,
-18 interpolation/fitting methods), price CMTs, and compute bond/CMT analytics:
+19 interpolation/fitting methods), price CMTs, and compute bond/CMT analytics:
 yield, duration, convexity, z-spread, par yield, curve zero rate, carry, and
 yield rolls (spot and forward at 1m/3m/6m/1y horizons). Bond analytics also
 return maturity-matched par-yield and fixed-coupon CMT comparables. 
@@ -818,7 +818,7 @@ Pass `interpolation=QLZeroInterp.<METHOD>` to `ql_build_zero_curve` /
 
 | Family                    | Members                                                                                                            | Rate type |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------ | --------- |
-| `InterpolatedZeroCurve`   | `LINEAR_ZERO`, `CUBIC_ZERO`, `NATURAL_CUBIC_ZERO`, `MONOTONE_CUBIC_ZERO`                                           | ZERO      |
+| `InterpolatedZeroCurve`   | `LINEAR_ZERO`, `CUBIC_ZERO`, `NATURAL_CUBIC_ZERO`, `MONOTONE_CUBIC_ZERO`, `CUBIC_SPLINE_REGRESSION`                | ZERO      |
 | `PiecewiseYieldCurve`     | `LINEAR_ZERO`, `CUBIC_ZERO`, `NATURAL_CUBIC_ZERO`, `KRUGER_ZERO`, `CONVEX_MONOTONE_ZERO`, `LOG_LINEAR_DISCOUNT`, … | PAR       |
 | `FittedBondDiscountCurve` | `NELSON_SIEGEL`, `SVENSSON`, `EXPONENTIAL_SPLINES`, `SIMPLE_POLYNOMIAL`, `CUBIC_BSPLINES`                          | PAR       |
 

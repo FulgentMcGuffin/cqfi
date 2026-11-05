@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 
+import numpy as np
 import QuantLib as ql
 import polars as pl
 
@@ -27,7 +29,14 @@ class QLZeroInterp(str, Enum):
     ``CUBIC_ZERO`` *(ZERO default)*            ``CubicZeroCurve``
     ``NATURAL_CUBIC_ZERO``                     ``NaturalCubicZeroCurve``
     ``MONOTONE_CUBIC_ZERO``                    ``MonotonicCubicZeroCurve``
+    ``CUBIC_SPLINE_REGRESSION``                least-squares cubic spline -> ``ZeroCurve``
     =========================================  =====================================
+
+    ``CUBIC_SPLINE_REGRESSION`` smooths the pillars instead of interpolating
+    them: a cubic regression spline (truncated-power basis, interior knots at
+    pillar-tenor quantiles) is fitted by least squares and sampled on a dense
+    grid.  The number of interior knots is set by *regression_knots* of
+    :func:`ql_build_zero_curve`.
 
     Members supported by **PAR** input rates (``PiecewiseYieldCurve``):
 
@@ -84,6 +93,7 @@ class QLZeroInterp(str, Enum):
     NATURAL_CUBIC_ZERO = "natural_cubic_zero"
     # ZERO only
     MONOTONE_CUBIC_ZERO = "monotone_cubic_zero"
+    CUBIC_SPLINE_REGRESSION = "cubic_spline_regression"
     # PAR only — zero-rate basis (piecewise bootstrap)
     KRUGER_ZERO = "kruger_zero"
     CONVEX_MONOTONE_ZERO = "convex_monotone_zero"
@@ -110,6 +120,7 @@ _QL_ZERO_CURVE_CLS: dict[QLZeroInterp, type] = {
     QLZeroInterp.CUBIC_ZERO: ql.CubicZeroCurve,
     QLZeroInterp.NATURAL_CUBIC_ZERO: ql.NaturalCubicZeroCurve,
     QLZeroInterp.MONOTONE_CUBIC_ZERO: ql.MonotonicCubicZeroCurve,
+    QLZeroInterp.CUBIC_SPLINE_REGRESSION: ql.ZeroCurve,  # fitted values on a dense grid
 }
 
 # Maps for piecewise bootstrap curves (RateType.PAR).
@@ -149,6 +160,7 @@ class ZeroCurveBuildOptions:
     interpolation: QLZeroInterp | None = None
     bspline_knots: list[float] | None = None
     poly_degree: int = 3
+    regression_knots: int | None = None
 
     def build(
         self,
@@ -165,7 +177,58 @@ class ZeroCurveBuildOptions:
             interpolation=self.interpolation,
             bspline_knots=self.bspline_knots,
             poly_degree=self.poly_degree,
+            regression_knots=self.regression_knots,
         )
+
+
+_SPLINE_GRID_POINTS = 241
+_DAYS_PER_YEAR = 365.25
+
+
+def _ql_spline_regression_fit(
+    tenor_years: list[float], rates: list[float], n_knots: int | None
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Least-squares cubic regression spline of rate on tenor.
+
+    Basis: ``1, x, x^2, x^3`` plus one truncated cube ``(x - knot)_+^3`` per
+    interior knot, with ``x`` scaled to [0, 1] for conditioning.  Knots sit at
+    quantiles of the pillar tenors.  Default knot count is
+    ``min(4, (n - 4) // 2)`` so the fit always has fewer parameters than pillars.
+    """
+    t = np.asarray(tenor_years, dtype=float)
+    n = len(t)
+    k = max(0, min(4, (n - 4) // 2)) if n_knots is None else n_knots
+    if n < 5 or not 0 <= k < n - 4:
+        raise ValueError(
+            f"Spline regression needs 0 <= regression_knots < n_pillars - 4 "
+            f"(got {k} knots for {n} pillars; at least 5 pillars required)"
+        )
+    lo, span = t.min(), np.ptp(t)
+    knots = (np.quantile(t, np.linspace(0, 1, k + 2)[1:-1]) - lo) / span
+
+    def basis(years: np.ndarray) -> np.ndarray:
+        x = (np.asarray(years, dtype=float) - lo) / span
+        return np.column_stack(
+            [x**p for p in range(4)] + [np.clip(x - kn, 0, None) ** 3 for kn in knots]
+        )
+
+    coef, *_ = np.linalg.lstsq(basis(t), np.asarray(rates, dtype=float), rcond=None)
+    return lambda years: basis(years) @ coef
+
+
+def _ql_spline_regression_inputs(
+    settlement: ql.Date,
+    tenor_years: list[float],
+    rates: list[float],
+    n_knots: int | None,
+) -> tuple[list[ql.Date], list[float]]:
+    """Dates and fitted rates for a ``ZeroCurve`` sampled from the regression spline."""
+    fit = _ql_spline_regression_fit(tenor_years, rates, n_knots)
+    grid = np.linspace(min(tenor_years), max(tenor_years), _SPLINE_GRID_POINTS)
+    days = np.unique(np.round(grid * _DAYS_PER_YEAR).astype(int))
+    days = days[days > 0]
+    fitted = fit(days / _DAYS_PER_YEAR).tolist()
+    return [settlement] + [settlement + int(d) for d in days], [fitted[0]] + fitted
 
 
 def _ql_auto_bspline_knots(tenor_years: list[float]) -> list[float]:
@@ -212,6 +275,7 @@ def ql_build_zero_curve(
     *,
     bspline_knots: list[float] | None = None,
     poly_degree: int = 3,
+    regression_knots: int | None = None,
 ) -> tuple[ql.YieldTermStructureHandle, pl.DataFrame]:
     """Build a yield curve from pillar rates with a selectable interpolation method.
 
@@ -236,6 +300,9 @@ def ql_build_zero_curve(
     poly_degree:
         Polynomial degree for ``SIMPLE_POLYNOMIAL`` (default 3).  Ignored for
         all other methods.
+    regression_knots:
+        Interior knot count for ``CUBIC_SPLINE_REGRESSION`` (ZERO only).  ``None``
+        picks ``min(4, (n_pillars - 4) // 2)``.  Ignored for all other methods.
 
     Returns
     -------
@@ -276,6 +343,10 @@ def ql_build_zero_curve(
             raise ValueError(
                 f"ZeroInterp.{interp.name} is not supported for ZERO rate inputs. "
                 f"Valid choices: {valid}"
+            )
+        if interp == QLZeroInterp.CUBIC_SPLINE_REGRESSION:
+            dates, curve_rates = _ql_spline_regression_inputs(
+                settlement, tenor_years, rates, regression_knots
             )
         curve = cls(dates, curve_rates, issuer.day_count, calendar)
     else:
