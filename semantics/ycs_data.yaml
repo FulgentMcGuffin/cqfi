@@ -157,6 +157,27 @@ conventions:
   tenor_columns: >
     Tenor columns follow the pattern Y<years:03d>p<tenths> (point replaced by 'p').
     To compute a spread between two tenors, subtract the two tenor columns.
+  curve_structures: >
+    Curve trades are signed combinations of par_rates tenor columns (use
+    par_rates, never zero_rates, unless the user says zero). Name "AyB" gives
+    two tenors A<B; "AyByC" gives three A<B<C. Level of a structure = the
+    weighted sum below, per date.
+    steepener (e.g. 5y10y): 1*par(B) - 1*par(A), i.e. short the short tenor,
+    long the long tenor.
+    flattener (e.g. 1y5y): 1*par(A) - 1*par(B), i.e. long the short tenor,
+    short the long tenor (negative of the steepener).
+    butterfly / fly (e.g. 1y4y8y): 1*par(A) - 2*par(B) + 1*par(C), long wings
+    (shortest, longest), short belly (middle). A "short" fly reverses the
+    signs: -1*par(A) + 2*par(B) - 1*par(C).
+    box (e.g. "2y15y DEU-FRA box"): steepener on one issuer plus flattener on
+    the other, same tenors. Level = (par_X(B) - par_X(A)) - (par_Y(B) - par_Y(A))
+    where X is the steepener issuer and Y the flattener issuer. By default the
+    first-named issuer (DEU) is the steepener and the second (FRA) the
+    flattener; if the user says which issuer is long (flattener) or which is
+    the steepener/flattener, follow that and give the other issuer the
+    opposite leg. Build it by self-joining par_rates on date with
+    source = '<X>' and source = '<Y>'. "Last year" = trailing 365 days from
+    the latest date in the table; "daily level" = one row per date.
   curve_keys: >
     swap_par_rates and repo_rfr_rates are keyed by currency (ccy), not by
     source/country. Filter swap curves on ccy (plus coupon_period,

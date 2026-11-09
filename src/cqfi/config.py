@@ -195,7 +195,7 @@ class DatasetConfig:
 # Default natural-language routing hints for the three built-in datasets.
 _INPUT_KEYWORDS = (
     "zero rate", "par rate", "spotfx", "window_corr", "correlation", "spread",
-    "slope", "ycs_data", "treasury curve", "yield curve",
+    "slope", "steepener", "flattener", "butterfly", " fly", " box", "ycs_data", "treasury curve", "yield curve",
     "swap rate", "swap curve", "swap par", "repo rate", "repo curve", "rfr",
     "swap_par_rates", "repo_rfr_rates",
     "exchange rate", "fx rate", "fx spot", "spot fx", "fx ", "forex",

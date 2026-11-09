@@ -231,7 +231,75 @@ HELP_TEXT_CQFI = (
     "      input: schema zero_rates\n"
     "      input: sql: SELECT …\n"
     "  • Force rule syntax even when an API key is set:  cqfi --rule\n"
+    "  • Curve structures on par rates (LLM mode): steepener, flattener, butterfly, box.\n"
+    '    "daily level of the 5y20y DEU-FRA box over the last year" (DEU steepener +\n'
+    '    FRA flattener), "1y4y8y butterfly in USA", "5y10y steepener in ITA".\n'
 )
+
+HELP_TEXT_GUI = (
+    HELP_TEXT_CQFI
+    + "\nChat window:\n"
+    "  /ctx          — show the last 5 turn recaps sent to the LLM as memory\n"
+    "  /ctx clear    — forget them (use this to clear the chat context)\n"
+    "  help, ?       — show this message\n"
+)
+
+_HELP_INTENT_RE = re.compile(
+    r"^\s*/?(help|\?)\s*$"
+    r"|\b(commands?|slash commands?|what can (you|i) (do|ask)|available (options|functions))\b"
+    r"|\b(clear|reset|forget|wipe)\b.*\b(context|memory|chat|history|conversation)\b"
+    r"|\bhow (do|can|should) i (use|clear|reset|run|start|launch|save|load)\b",
+    re.IGNORECASE,
+)
+
+
+_INTERFACE_GUIDANCE = (
+    "Interface commands. When the user asks HOW to do something (price a bond, compute "
+    "analytics, show a curve, look up a bond, clear context, ...) and a command below fits, "
+    "answer FIRST with that exact command, filled in with the user's ids/dates and a short "
+    "explanation of its arguments. Only afterwards, and briefly, mention that the same can "
+    "be asked in natural language. Never present internal tool names or Python calls "
+    "(e.g. compute_bond_analytics) as the way for the user to do it.\n\n"
+)
+
+
+def with_interface_help(profile_prompt: str | None) -> str:
+    """Append the interface-command reference and answer-order guidance to *profile_prompt*."""
+    return f"{profile_prompt or ''}\n\n{_INTERFACE_GUIDANCE}{HELP_TEXT_GUI}".strip()
+
+
+_COMMAND_NAMES = (
+    "bond", "mctx", "calc", "curve", "dlv", "fut", "batch", "save_cache", "cache", "clean", "ctx",
+)
+
+_CLEAR_INTENT_RE = re.compile(
+    r"\b(clear|reset|forget|wipe|erase|empty|delete)\b.*\b(context|memory|chat|history|conversation|transcript)\b",
+    re.IGNORECASE,
+)
+
+CLEAR_HELP_GUI = (
+    "To clear the context:\n"
+    "  • Click the **Clear** button (right of *Copy Chart*): resets the LLM memory and "
+    "empties the transcript, table and plot.\n"
+    "  • Or type `/ctx clear`: resets only the LLM memory (the last 5 turn recaps sent "
+    "with each question); the transcript, table and plot stay.\n"
+    "  • `/ctx` shows what memory is currently sent to the LLM.\n"
+)
+
+
+def help_reply(text: str) -> str | None:
+    """GUI answer for a clear-context question, ``help`` or a commands/interface question, else None."""
+    if _CLEAR_INTENT_RE.search(text):
+        return CLEAR_HELP_GUI
+    if not _HELP_INTENT_RE.search(text):
+        return None
+    names = [n for n in _COMMAND_NAMES if re.search(rf"(?<![\w])/?{n}\b", text, re.IGNORECASE)]
+    blocks = [
+        b
+        for b in HELP_TEXT_GUI.split("\n\n")
+        if any(re.search(rf"^\s*/{n}\b", b, re.MULTILINE) for n in names)
+    ]
+    return "\n\n".join(blocks) if blocks else HELP_TEXT_GUI
 
 
 _PRICE_RE = re.compile(
@@ -1044,7 +1112,7 @@ async def _query_dataset(
         profile_prompt: str | None = None
         if use_agent or use_single_shot:
             description = await client.describe_dataset()
-            profile_prompt = description.get("prompt") or None
+            profile_prompt = with_interface_help(description.get("prompt"))
 
         if use_agent:
             from mcp_data.client.agent import SQLAgent

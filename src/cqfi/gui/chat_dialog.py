@@ -363,7 +363,10 @@ def memory_preamble(memory: list[str]) -> str:
         return ""
     return (
         "Context — recent turns in this chat (reference only; re-run SQL to get the data, "
-        "answer only the new request below):\n"
+        "answer only the new request below). If the new request refers to 'that', 'this', "
+        "'it' or omits its subject, it refers to the MOST RECENT turn: reuse its subject, "
+        "dataset, issuers, tenors and structure, and change only what the new request "
+        "states (e.g. dates, frequency):\n"
         + "\n---\n".join(memory)
         + "\n\nNew request: "
     )
@@ -392,6 +395,7 @@ class LlmWorker(QObject):
         super().__init__()
         self._app_settings = app_settings
         self._memory: list[str] = []  # recent turn summaries (see summarize_turn)
+        self._last_target: str | None = None  # dataset of the last LLM turn (follow-up routing)
         self.query_requested.connect(self.run_query)
 
     @Slot(str)
@@ -408,6 +412,7 @@ class LlmWorker(QObject):
             handle_fut_command,
             handle_mctx_command,
             handle_runtime_toggle_commands,
+            help_reply,
         )
         from cqfi.batch.command import (
             build_batch_launch_request,
@@ -434,6 +439,11 @@ class LlmWorker(QObject):
         ctx_reply = self._handle_ctx_command(text)
         if ctx_reply is not None:
             self.finished.emit(ctx_reply, None)
+            return
+
+        help_text = None if text.startswith("/") and text.split()[0] != "/help" else help_reply(text)
+        if help_text is not None:
+            self.finished.emit(help_text, None)
             return
 
         cache_result = handle_runtime_toggle_commands(text)
@@ -622,6 +632,7 @@ class LlmWorker(QObject):
             return None
         if parts[1:] == ["clear"]:
             self._memory.clear()
+            self._last_target = None
             return "LLM chat context cleared."
         if len(parts) > 1:
             return "Usage: /ctx (show recap sent to the LLM) or /ctx clear"
@@ -632,7 +643,14 @@ class LlmWorker(QObject):
         )
 
     async def _execute(self, query: str) -> tuple[str, pl.DataFrame | None]:
-        from cqfi.agent.cli import EXTRA_TOOLS, build_llm, mcp_settings_for, route_query
+        from cqfi.agent.cli import (
+            EXTRA_TOOLS,
+            RoutedQuery,
+            build_llm,
+            mcp_settings_for,
+            route_query,
+            with_interface_help,
+        )
         from cqfi.cli_tools import resolve_bond_mentions
         from mcp_data.client.agent import SQLAgent
         from mcp_data.client.session import DBClient
@@ -644,6 +662,8 @@ class LlmWorker(QObject):
             )
 
         routed = route_query(self._app_settings, rewritten)
+        if routed is None and self._last_target in self._app_settings.mcp_datasets:
+            routed = RoutedQuery(self._last_target, rewritten)  # follow-up: "that", "this"
         if routed is None:
             return (
                 "Ambiguous query — try prefixing with `input:`, `cache:`, or "
@@ -655,7 +675,7 @@ class LlmWorker(QObject):
         settings = mcp_settings_for(self._app_settings, routed.target)
         async with DBClient(settings) as client:
             profile = await client.describe_dataset()
-            profile_prompt = (
+            profile_prompt = with_interface_help(
                 profile.get("prompt") if isinstance(profile, dict) else None
             )
             agent = SQLAgent(
@@ -673,6 +693,7 @@ class LlmWorker(QObject):
                 summarize_turn(routed.text, routed.target, answer, result.messages, dataframe)
             )
             del self._memory[:-MEMORY_TURNS]
+            self._last_target = routed.target
             return answer, dataframe
 
 
@@ -862,6 +883,12 @@ class ChatDialog(QMainWindow):
         self._copy_chart_btn.setEnabled(False)
         actions_row.addWidget(self._copy_chart_btn)
 
+        self._clear_btn = QPushButton("Clear")
+        self._clear_btn.setObjectName("actionBtn")
+        self._clear_btn.setToolTip("Clear LLM context, transcript, table and plot")
+        self._clear_btn.clicked.connect(self._clear_all)
+        actions_row.addWidget(self._clear_btn)
+
         actions_row.addStretch()
         layout.addLayout(actions_row)
 
@@ -994,6 +1021,7 @@ class ChatDialog(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         self._send_btn.setDisabled(busy)
+        self._clear_btn.setDisabled(busy)
         self._prompt_input.setDisabled(busy)
         self._settings_btn.setDisabled(busy)
         self._pending_reply = busy
@@ -1060,6 +1088,20 @@ class ChatDialog(QMainWindow):
         self._append_user_message(query)
         self._set_busy(True)
         self._llm_worker.query_requested.emit(query)
+
+    def _clear_all(self) -> None:
+        """Reset LLM memory (via ``/ctx clear``), transcript, table, plot and data buttons."""
+        self._chat_log.clear()
+        self._last_dataframe = None
+        self._plot.clear_plot()
+        self._table.setSortingEnabled(False)
+        self._table.clearContents()
+        self._table.setRowCount(0)
+        self._table.setColumnCount(0)
+        for btn in (self._download_btn, self._copy_data_btn, self._copy_chart_btn):
+            btn.setEnabled(False)
+        self._set_busy(True)
+        self._llm_worker.query_requested.emit("/ctx clear")
 
     def _on_llm_response(self, answer: str, dataframe: object) -> None:
         self._pending_reply = False
