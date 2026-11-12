@@ -21,6 +21,7 @@ def app(tmp_path: Path) -> SimpleNamespace:
             "bond_analytics": SimpleNamespace(keywords=_BOND_ANALYTICS_KEYWORDS),
         },
         bond_analytics_db_path=tmp_path / "missing.duckdb",
+        ycs_semantics_dir=Path(__file__).parent.parent / "semantics",
     )
 
 
@@ -122,3 +123,15 @@ def test_interface_help_in_agent_prompt():
     prompt = cli.with_interface_help("PROFILE")
     assert prompt.startswith("PROFILE") and "FIRST with that exact command" in prompt and "/calc <bond_id>" in prompt
     assert cli.with_interface_help(None).startswith("Interface commands")
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["what is the chf for the last year?", "plot me CHF for the last year?", "show yen last month", "GBP over 2024", "cable this week"],
+)
+def test_bare_currency_routes_to_input(app, text):
+    assert _target(app, text) == "input"
+
+
+def test_fx_fallback_does_not_override_bond_keyword(app):
+    assert _target(app, "price the EUR bond") == "bond_analytics"

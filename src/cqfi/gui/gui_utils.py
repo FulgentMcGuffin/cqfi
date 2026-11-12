@@ -10,6 +10,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QCursor, QColor, QPainter, QPainterPath, QRegion
 from PySide6.QtWidgets import (
+    QMessageBox,
     QAbstractScrollArea,
     QFrame,
     QGraphicsDropShadowEffect,
@@ -346,3 +347,20 @@ class SmoothScroller(QObject):
         self._anim.setEndValue(self._target)
         self._anim.start()
         return True
+
+
+def show_message(
+    parent: QWidget,
+    icon: "QMessageBox.Icon",
+    title: str,
+    text: str,
+    theme: "str | Theme | None" = None,
+) -> None:
+    """Modal message box styled with the active UI theme (same look as the settings dialog)."""
+    from gui_constants import dialog_style, get_theme
+
+    t = get_theme(theme)
+    box = QMessageBox(icon, title, text, QMessageBox.StandardButton.Ok, parent)
+    # dialog_style() makes QDialog transparent for frameless shells; restore it for the native frame.
+    box.setStyleSheet(dialog_style(t) + f"QMessageBox {{ background-color: {t.bg}; }}")
+    box.exec()

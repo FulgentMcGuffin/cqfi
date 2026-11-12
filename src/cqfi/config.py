@@ -16,7 +16,7 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "cqfi.yaml"
 DEFAULT_RUNTIME_CONFIG_DIR = Path.home() / ".cqfi"
 DEFAULT_RUNTIME_CONFIG_PATH = DEFAULT_RUNTIME_CONFIG_DIR / "cqfi_runtime.json"
 
-DEFAULT_LLM_MODEL = "claude-sonnet-5"
+DEFAULT_LLM_MODEL = "claude-sonnet-5-5"
 
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 

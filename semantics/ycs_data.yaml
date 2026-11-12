@@ -72,9 +72,11 @@ vocabulary:
   fx_pairs:
     EUR: EURUSD
     euro: EURUSD
+    fiber: EURUSD
     GBP: GBPUSD
     sterling: GBPUSD
     pound: GBPUSD
+    cable: GBPUSD
     JPY: USDJPY
     yen: USDJPY
     CAD: USDCAD
@@ -193,7 +195,10 @@ conventions:
     column from the fx_pairs vocabulary and never filter on spotfx.source. An
     "exchange rate" for a non-USD currency means its pair against USD. For a
     cross rate (e.g. EURGBP) divide the two USD pairs: EURUSD / GBPUSD. "Latest"
-    means the most recent date with a non-NULL value for that column.
+    means the most recent date with a non-NULL value for that column. A bare
+    currency code or name from fx_pairs with no other context ("CHF last year",
+    "plot yen") means that pair's spotfx column over the period; "last year" =
+    trailing 365 days from the latest date in the table.
 
 tables:
   zero_rates:

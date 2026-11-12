@@ -21,7 +21,7 @@
 
 # Anthropic model for LLM mode (CLI + GUI). Override with CQFI_LLM_MODEL.
 llm:
-  model: claude-sonnet-5
+  model: claude-sonnet-5-5
 
 paths:
   # Alternatives (uncomment one pair):

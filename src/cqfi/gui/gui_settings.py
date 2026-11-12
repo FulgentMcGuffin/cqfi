@@ -13,6 +13,7 @@ DEFAULT_DOWNLOAD_SETTINGS = {
     "format": "csv",
     "headers": True,
     "directory": None,
+    "melt": False,
 }
 
 DEFAULT_SETTINGS: dict = {

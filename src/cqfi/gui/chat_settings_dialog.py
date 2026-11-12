@@ -217,6 +217,11 @@ class ChatSettingsDialog(QDialog):
         self._headers_cb.setChecked(self.download_settings.get("headers", True))
         layout.addWidget(self._headers_cb)
 
+        # Melt checkbox
+        self._melt_cb = QCheckBox("Melt Data")
+        self._melt_cb.setChecked(bool(self.download_settings.get("melt", False)))
+        layout.addWidget(self._melt_cb)
+
         # Directory selection
         dir_row = QHBoxLayout()
         dir_row.addWidget(QLabel("Directory:"))
@@ -289,6 +294,7 @@ class ChatSettingsDialog(QDialog):
         self.download_settings = {
             "format": self._format_combo.currentText(),
             "headers": self._headers_cb.isChecked(),
+            "melt": self._melt_cb.isChecked(),
             "directory": self._dir_input.text(),
         }
 

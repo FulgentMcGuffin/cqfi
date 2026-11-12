@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from chat_settings_dialog import ChatSettingsDialog
+from melt_dialog import MeltDialog
 from gui_constants import Theme, get_plot_bg, get_theme, window_style
 from gui_settings import load_settings, save_settings
 
@@ -42,6 +43,7 @@ from gui_utils import (
     RoundedShell,
     SmoothScroller,
     TitleBar,
+    show_message,
 )
 from plotnine_wrapper import (
     coerce_date_columns,
@@ -357,6 +359,21 @@ def summarize_turn(
     return "\n".join(parts)
 
 
+_SQL_FENCE_RE = re.compile(r"```sql\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+
+
+def extract_sql(answer: str, messages) -> str | None:
+    """Last SQL the LLM ran (``run_sql`` tool call), else the last ```sql block of *answer*."""
+    sqls = [
+        str(call.get("args", {}).get("sql", "")).strip()
+        for msg in messages or []
+        for call in getattr(msg, "tool_calls", None) or []
+        if call.get("name") == "run_sql"
+    ]
+    sqls += [m.strip() for m in _SQL_FENCE_RE.findall(answer or "")]
+    return next((s for s in reversed(sqls) if s), None)
+
+
 def memory_preamble(memory: list[str]) -> str:
     """Prefix for the next prompt; empty when there is nothing to recall."""
     if not memory:
@@ -387,6 +404,7 @@ class LlmWorker(QObject):
 
     query_requested = Signal(str)
     finished = Signal(str, object)
+    sql_ready = Signal(str)  # emitted just before ``finished`` when the reply involved SQL
     error = Signal(str)
     batch_ready = Signal(object)  # BatchLaunchRequest — must be shown on the GUI thread
     future_batch_ready = Signal(object)  # FutureBatchLaunchRequest — ditto
@@ -694,6 +712,9 @@ class LlmWorker(QObject):
             )
             del self._memory[:-MEMORY_TURNS]
             self._last_target = routed.target
+            sql = extract_sql(answer, result.messages)
+            if sql:
+                self.sql_ready.emit(sql)
             return answer, dataframe
 
 
@@ -739,6 +760,9 @@ class ChatDialog(QMainWindow):
         self._settings = load_settings()
         self._theme = get_theme(self._settings.get("ui_theme"))
         self._last_dataframe: pl.DataFrame | None = None
+        self._last_sql: str | None = None  # SQL of the latest reply (Copy SQL button)
+        self._df_sql: str | None = None  # SQL behind _last_dataframe (melt defaults)
+        self._pending_sql: str | None = None  # set by LlmWorker.sql_ready just before the reply
         self._chat_log: list[str] = []
         self._pending_reply = False
         self._busy_clock = QElapsedTimer()
@@ -864,6 +888,12 @@ class ChatDialog(QMainWindow):
         actions_row.setSpacing(8)
         actions_row.addStretch()
 
+        self._copy_sql_btn = QPushButton("Copy SQL")
+        self._copy_sql_btn.setObjectName("actionBtn")
+        self._copy_sql_btn.clicked.connect(self._copy_sql)
+        self._copy_sql_btn.setEnabled(False)
+        actions_row.addWidget(self._copy_sql_btn)
+
         self._download_btn = QPushButton("Download Data")
         self._download_btn.setObjectName("actionBtn")
         self._download_btn.clicked.connect(self._download_data)
@@ -906,6 +936,7 @@ class ChatDialog(QMainWindow):
         self._worker_thread = QThread(self)
         self._llm_worker = LlmWorker(self._app_settings)
         self._llm_worker.moveToThread(self._worker_thread)
+        self._llm_worker.sql_ready.connect(self._on_sql_ready)
         self._llm_worker.finished.connect(self._on_llm_response)
         self._llm_worker.error.connect(self._on_llm_error)
         self._llm_worker.batch_ready.connect(self._on_batch_ready)
@@ -1089,10 +1120,29 @@ class ChatDialog(QMainWindow):
         self._set_busy(True)
         self._llm_worker.query_requested.emit(query)
 
+    def _on_sql_ready(self, sql: str) -> None:
+        self._pending_sql = sql
+
+    def _copy_sql(self) -> None:
+        """Copy the last reply's SQL (only) to the clipboard and tell the user."""
+        if not self._last_sql:
+            return
+        QApplication.clipboard().setText(self._last_sql)
+        show_message(
+            self,
+            QMessageBox.Icon.Information,
+            "SQL Copied",
+            "The SQL statement was copied to the clipboard.",
+            self._theme,
+        )
+
     def _clear_all(self) -> None:
         """Reset LLM memory (via ``/ctx clear``), transcript, table, plot and data buttons."""
         self._chat_log.clear()
         self._last_dataframe = None
+        self._df_sql = None
+        self._pending_sql = None
+        self._set_last_sql(None)
         self._plot.clear_plot()
         self._table.setSortingEnabled(False)
         self._table.clearContents()
@@ -1103,18 +1153,34 @@ class ChatDialog(QMainWindow):
         self._set_busy(True)
         self._llm_worker.query_requested.emit("/ctx clear")
 
+    def _set_last_sql(self, sql: str | None) -> None:
+        self._last_sql = sql
+        self._copy_sql_btn.setEnabled(bool(sql))
+
     def _on_llm_response(self, answer: str, dataframe: object) -> None:
         self._pending_reply = False
+        self._set_last_sql(self._pending_sql)  # only the latest reply's SQL, else disabled
+        self._pending_sql = None
         self._append_assistant_message(answer)
-        if isinstance(dataframe, pl.DataFrame):
-            dataframe = coerce_date_columns(dataframe)
-            self._last_dataframe = dataframe
-            self._update_table(dataframe)
-            self._update_plot(dataframe)
-        self._set_busy(False)
+        try:
+            if isinstance(dataframe, pl.DataFrame):
+                # Decimal columns (e.g. DuckDB ROUND/CAST) break plotnine's continuous scale.
+                dataframe = coerce_date_columns(
+                    dataframe.with_columns(pl.selectors.decimal().cast(pl.Float64))
+                )
+                self._last_dataframe = dataframe
+                self._df_sql = self._last_sql
+                self._update_table(dataframe)
+                self._update_plot(dataframe)
+        except Exception as exc:  # never leave the UI stuck on "Thinking…"
+            self._append_system_message(f"Could not display the result: {exc}")
+        finally:
+            self._set_busy(False)
 
     def _on_llm_error(self, message: str) -> None:
         self._pending_reply = False
+        self._pending_sql = None
+        self._set_last_sql(None)
         self._append_system_message(f"Error: {message}")
         self._set_busy(False)
 
@@ -1231,13 +1297,26 @@ class ChatDialog(QMainWindow):
     def _download_data(self) -> None:
         """Download the current dataframe to file based on settings."""
         if self._last_dataframe is None or self._last_dataframe.is_empty():
-            QMessageBox.information(self, "No Data", "No data available to download.")
+            show_message(
+                self,
+                QMessageBox.Icon.Information,
+                "No Data",
+                "No data available to download.",
+                self._theme,
+            )
             return
 
         download_settings = self._settings.get("download_settings", {})
         file_format = download_settings.get("format", "csv")
         include_headers = download_settings.get("headers", True)
         directory = download_settings.get("directory") or str(Path.home())
+
+        df = self._last_dataframe
+        if download_settings.get("melt", False):
+            dlg = MeltDialog(df, self._df_sql, self, self._theme)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            df = dlg.melted
 
         # Generate default filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1261,23 +1340,27 @@ class ChatDialog(QMainWindow):
 
         try:
             if file_format == "csv":
-                self._last_dataframe.write_csv(
+                df.write_csv(
                     file_path,
                     include_header=include_headers,
                 )
             else:
-                self._last_dataframe.write_parquet(file_path)
+                df.write_parquet(file_path)
 
-            QMessageBox.information(
+            show_message(
                 self,
+                QMessageBox.Icon.Information,
                 "Download Complete",
                 f"Data saved to:\n{file_path}",
+                self._theme,
             )
         except Exception as exc:
-            QMessageBox.critical(
+            show_message(
                 self,
+                QMessageBox.Icon.Critical,
                 "Download Failed",
                 f"Could not save file:\n{exc}",
+                self._theme,
             )
 
     def _copy_table_data(self) -> None:

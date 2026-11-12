@@ -843,6 +843,27 @@ def _mentions_known_id(app: AppSettings, lowered: str) -> bool:
     return False
 
 
+@lru_cache(maxsize=2)
+def _fx_term_re(profile: str, mtime_ns: int) -> re.Pattern[str] | None:
+    """Whole-word regex over the ``vocabulary.fx_pairs`` keys (CHF, yen, euro, ...) of *profile*."""
+    import yaml
+
+    with open(profile, encoding="utf-8") as fh:
+        terms = (yaml.safe_load(fh).get("vocabulary") or {}).get("fx_pairs") or {}
+    names = sorted(map(str, terms), key=len, reverse=True)
+    return re.compile(r"\b(?:%s)\b" % "|".join(map(re.escape, names)), re.I) if names else None
+
+
+def _mentions_fx_term(app: AppSettings, text: str) -> bool:
+    """True when *text* names a currency/code from the ycs_data ``fx_pairs`` vocabulary."""
+    try:
+        path = app.ycs_semantics_dir / "ycs_data.yaml"
+        pattern = _fx_term_re(str(path), path.stat().st_mtime_ns)
+    except Exception:  # missing/invalid profile: no FX fallback
+        return False
+    return bool(pattern and pattern.search(text))
+
+
 def route_query(app: AppSettings, text: str) -> RoutedQuery | None:
     """Parse an explicit `<dataset>:` prefix or infer the dataset from ids, then keywords."""
     lowered = text.strip().lower()
@@ -858,6 +879,11 @@ def route_query(app: AppSettings, text: str) -> RoutedQuery | None:
     # Fallback: a bond / future id (e.g. "FOAT last week") implies bond_analytics.
     if "bond_analytics" in app.mcp_datasets and _mentions_known_id(app, lowered):
         return RoutedQuery("bond_analytics", text)
+
+    # Last resort: a bare currency term ("CHF last year", "yen") means spotfx in ycs_data.
+    # Word-bounded and checked last so "EUR bond" etc. still route by their own keywords.
+    if "input" in app.mcp_datasets and _mentions_fx_term(app, text):
+        return RoutedQuery("input", text)
 
     return None
 
