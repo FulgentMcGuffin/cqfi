@@ -141,7 +141,7 @@ On startup, `ycs_db`, `bond_analytics_db`, and `quant_cache_db` must resolve to
 | Quant cache DB           | `paths.quant_cache_db`           | `D:/data/duckdb/quant_cache.duckdb`    |
 | Quant cache semantics    | `paths.quant_cache_semantics`    | `./semantics/quant_cache.yaml`         |
 | Sessions                 | `paths.sessions_dir`             | `./data/sessions/`                     |
-| LLM model                | `llm.model`                      | `claude-sonnet-5-5`                    |
+| LLM model                | `llm.model`                      | `claude-haiku-5-5`                    |
 
 
 
@@ -399,9 +399,9 @@ Natural-language dataset questions require LLM mode:
 # Option 1: set API key in .env — cqfi auto-enables single-shot LLM
 ANTHROPIC_API_KEY=sk-ant-...
 
-# Optional: pick the Anthropic model (default claude-sonnet-5-5) via
+# Optional: pick the Anthropic model (default claude-haiku-5-5) via
 # `llm.model` in config/cqfi.yaml, or override with the env var:
-CQFI_LLM_MODEL=claude-sonnet-5-5
+CQFI_LLM_MODEL=claude-haiku-5-5
 
 # Option 2: explicit flags
 uv run cqfi --llm
