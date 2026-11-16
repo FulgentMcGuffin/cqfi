@@ -109,8 +109,8 @@ def _matplotlib_num_to_date_str(x: float) -> str | None:
 
 def normalize_x_value(value):
     """Convert assorted date-like values to a Python datetime/date when possible."""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return value
+    if value is None or value is pd.NaT or (isinstance(value, float) and pd.isna(value)):
+        return None
 
     if isinstance(value, (datetime, date, pd.Timestamp)):
         return value
@@ -190,10 +190,12 @@ def parse_flexible_datetime(value) -> datetime | None:
 
 def format_display_date(value) -> str:
     """Format a date/datetime-like value for table labels and plot tooltips."""
-    if value is None:
+    if value is None or value is pd.NaT:
         return ""
 
     normalized = normalize_x_value(value)
+    if normalized is pd.NaT:
+        return ""
     if isinstance(normalized, datetime):
         if normalized.hour or normalized.minute or normalized.second:
             return normalized.strftime("%Y-%m-%d %H:%M")
@@ -222,7 +224,7 @@ def format_display_date(value) -> str:
 
 def format_table_cell(value) -> str:
     """Format a dataframe cell for display in the table."""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+    if value is None or value is pd.NaT or (isinstance(value, float) and pd.isna(value)):
         return ""
     
     # First check for common datetime types
