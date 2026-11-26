@@ -1,7 +1,9 @@
 """QuantLib implementation of :class:`~cqfi.bond_future_calculator.BondFutureCalculator`.
 
-Basis is measured to the last delivery day, the market convention for net
-basis on contracts where the seller chooses the delivery date.  With
+Basis is measured to the delivery day on the request. That day is an explicit
+date, the first or last business day of the delivery period, or — by default —
+the seller's choice (``minmax``): the business day on which a deliverable bond
+has the lowest net basis. With
 ``P`` the clean price and ``A(x)`` accrued at ``x``, financing at rate ``r``
 over the day-count fraction ``t(a, b)`` and coupons ``c_j`` paid in
 ``(settlement, delivery]``::
@@ -76,12 +78,12 @@ class QuantLibBondFutureCalculator:
         convention = request.bond_future.convention
         issuer = convention.issuer()
         settlement = request.settlement_date()
-        delivery = request.delivery_date()
 
         saved_evaluation_date = ql.Settings.instance().evaluationDate
         try:
             ql.Settings.instance().evaluationDate = to_ql_date(settlement)
             curve_handle = market.curve_collection(label).bond_curve(issuer.source_code)
+            delivery = self._resolve_delivery(request, curve_handle, settlement)
             # Reported on the basket output; the rate actually applied to a
             # given bond may differ when it carries its own override below.
             repo_rate = self._repo_rate(None, request, curve_handle, settlement, delivery)
@@ -123,6 +125,113 @@ class QuantLibBondFutureCalculator:
             futures_price_is_implied=is_implied,
             repo_rate=repo_rate * 100.0,
             outputs=outputs,
+        )
+
+    def _resolve_delivery(
+        self,
+        request: BondFutureInput,
+        curve_handle: ql.YieldTermStructureHandle,
+        settlement: date,
+    ) -> date:
+        """Return the delivery day basis is measured to.
+
+        An explicit date, ``first``, or ``last`` is already validated on the
+        request. ``minmax`` searches every remaining business day in the
+        delivery period and keeps the day on which a deliverable bond has the
+        lowest net basis. When no futures price was supplied, that is the day
+        with the lowest implied fair futures price, which is the invoice that
+        sets that bond's net basis to zero and leaves every other delivery at
+        least as expensive.
+        """
+        pinned = request.resolved_delivery_date()
+        if pinned is not None:
+            return pinned
+
+        days = [
+            day
+            for day in request.bond_future.delivery_business_days()
+            if day >= request.trade_date
+        ]
+        if not days:
+            raise BondFutureAnalyticsError(
+                f"trade date {request.trade_date.isoformat()} is after every "
+                f"delivery day of {request.bond_future}"
+            )
+        if len(days) == 1:
+            return days[0]
+
+        prepared = [
+            (
+                member,
+                *self._prepare_bond(
+                    member.bond,
+                    member.conversion_factor_override,
+                    request,
+                    request.bond_future.convention.issuer(),
+                    curve_handle,
+                    settlement,
+                ),
+            )
+            for member in request.delivery_basket.members
+        ]
+        day_count = request.bond_future.convention.repo_day_count()
+        best_day = days[0]
+        best_score: float | None = None
+        for day in days:
+            for member, qlbond, clean, accrued, factor in prepared:
+                repo_rate = self._repo_rate(
+                    member.repo_term_structure_override,
+                    request,
+                    curve_handle,
+                    settlement,
+                    day,
+                )
+                forward = self._forward_clean_price(
+                    clean + accrued,
+                    self._coupons_between(qlbond, to_ql_date(settlement), to_ql_date(day)),
+                    qlbond.accruedAmount(to_ql_date(day)),
+                    settlement,
+                    day,
+                    repo_rate,
+                    day_count,
+                )
+                score = (
+                    forward / factor
+                    if request.futures_price is None
+                    else forward - request.futures_price * factor
+                )
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_day = day
+        return best_day
+
+    def _prepare_bond(
+        self,
+        bond: Bond,
+        override: float | None,
+        request: BondFutureInput,
+        issuer: IssuerProfile,
+        curve_handle: ql.YieldTermStructureHandle,
+        settlement: date,
+    ) -> tuple[ql.Bond, float, float, float]:
+        """Return ``(ql bond, clean price, accrued, conversion factor)`` at settlement."""
+        qlbond = build_deliverable(bond, issuer, settlement)
+        qlbond.setPricingEngine(ql.DiscountingBondEngine(curve_handle))
+        factor = (
+            override
+            if override is not None
+            else conversion_factor(bond, request.bond_future)
+        )
+        if factor <= 0:
+            raise BondFutureAnalyticsError(
+                f"Conversion factor for {bond.user_friendly_id or bond.bond_id} "
+                f"must be positive, got {factor}"
+            )
+        return (
+            qlbond,
+            qlbond.cleanPrice(),
+            qlbond.accruedAmount(to_ql_date(settlement)),
+            factor,
         )
 
     def compute_conversion_factor(self, bond: Bond, bond_future: BondFuture) -> float:

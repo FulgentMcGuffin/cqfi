@@ -164,6 +164,18 @@ class QuantLibCurveCollection:
     built by :func:`cqfi.quantlib.quantlib_curve.ql_build_zero_curve`.  Swap
     curves are indexed by :class:`SwapCurveKey` and repo/funding curves by the
     distinct :class:`RepoCurveKey`.
+
+    Key examples:
+
+    * Bond — issuer code: ``"USA"``, ``"DEU"``, ``"GBR"`` (see :meth:`set_bond_curve`,
+      :meth:`bond_curve`).
+    * Swap — :class:`~cqfi.curve_keys.SwapCurveKey` with currency, floating and fixed
+      coupon periods, and optional index, e.g.
+      ``SwapCurveKey("USD", float_period="3M", fixed_period="6M")`` or
+      ``SwapCurveKey("EUR", "6M", "1Y", "ESTR")``.
+    * Repo — :class:`~cqfi.curve_keys.RepoCurveKey` with currency, quote period, and
+      optional index, e.g. ``RepoCurveKey("USD", period="3M")`` or
+      ``RepoCurveKey("EUR", "6M", "ESTR")``.
     """
 
     as_of: date | datetime

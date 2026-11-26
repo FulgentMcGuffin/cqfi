@@ -229,10 +229,10 @@ tables:
       carry_roll_3m_fwdyield: {type: REAL, description: "Carry roll of the bond as a percentage of face value for 3 months by comparing the spot yield to maturity of the bond with the forward yield to maturity of the bond 3 months in the future"}
       carry_roll_6m_fwdyield: {type: REAL, description: "Carry roll of the bond as a percentage of face value for 6 months by comparing the spot yield to maturity of the bond with the forward yield to maturity of the bond 6 months in the future"}
       carry_roll_1y_fwdyield: {type: REAL, description: "Carry roll of the bond as a percentage of face value for 1 year by comparing the spot yield to maturity of the bond with the forward yield to maturity of the bond 1 year in the future"}
-      asw_spread_1m: {type: REAL, description: "ASW spread of the bond as a percentage of face value for 1 month."}
-      asw_spread_3m: {type: REAL, description: "ASW spread of the bond as a percentage of face value for 3 months."}
-      asw_spread_6m: {type: REAL, description: "ASW spread of the bond as a percentage of face value for 6 months."}
-      asw_spread_1y: {type: REAL, description: "ASW spread of the bond as a percentage of face value for 1 year."}
+      asw_mm_spread: {type: REAL, description: "Matched-maturity yield-to-yield asset-swap spread, in percent: bond yield minus the par swap rate to the bond maturity."}
+      asw_true_spread: {type: REAL, description: "Par/par (true) asset-swap spread, in percent: floating spread on a par notional whose fixed leg matches the bond cash flows."}
+      asw_z_spread: {type: REAL, description: "Asset-swap z-spread, in percent: semiannual parallel shift of the swap discount curve that reprices the bond to its dirty price."}
+      asw_proceeds_spread: {type: REAL, description: "Proceeds asset-swap spread, in percent: floating spread on a notional equal to the bond dirty price. Nominal cash flows; no inflation uplift."}
 
   cmt_analytics:
       description: 
@@ -256,10 +256,10 @@ tables:
         convexity: {type: REAL, description: "Convexity of the CMT as a percentage."}
         dv01_sensitivity: {type: REAL, description: "Duration sensitivity of the CMT as a percentage of face value (DV01)."}
         gamma_sensitivity: {type: REAL, description: "Dollar convexity sensitivity of the CMT as a percentage of face value."}
-      asw_spread_1m: {type: REAL, description: "ASW spread of the CMT as a percentage of face value for 1 month."}
-      asw_spread_3m: {type: REAL, description: "ASW spread of the CMT as a percentage of face value for 3 months."}
-      asw_spread_6m: {type: REAL, description: "ASW spread of the CMT as a percentage of face value for 6 months."}
-      asw_spread_1y: {type: REAL, description: "ASW spread of the CMT as a percentage of face value for 1 year."}
+        asw_mm_spread: {type: REAL, description: "Matched-maturity yield-to-yield asset-swap spread, in percent: CMT yield minus the par swap rate to the CMT maturity."}
+        asw_true_spread: {type: REAL, description: "Par/par (true) asset-swap spread of the CMT, in percent: floating spread on a par notional whose fixed leg matches the CMT cash flows."}
+        asw_z_spread: {type: REAL, description: "Asset-swap z-spread of the CMT, in percent: semiannual parallel shift of the swap discount curve that reprices the CMT to its dirty price."}
+        asw_proceeds_spread: {type: REAL, description: "Proceeds asset-swap spread of the CMT, in percent: floating spread on a notional equal to the CMT dirty price. Nominal cash flows; no inflation uplift."}
 
   bond_future_conventions:
     description: >
@@ -295,7 +295,7 @@ tables:
       delivery_month: {type: TEXT, description: "Delivery month code and year (e.g., Z2029 for December 2029)"}
       trade_date: {type: TEXT, description: "Trade date YYYY-MM-DD"}
       settlement_date: {type: TEXT, description: "Bond settlement implied by trade date (YYYY-MM-DD)"}
-      delivery_date: {type: TEXT, description: "Last delivery day (YYYY-MM-DD)"}
+      delivery_date: {type: TEXT, description: "Delivery day basis is measured to (YYYY-MM-DD). A business day in the contract delivery period; the seller's optimal day when the request asked for minmax."}
       futures_price: {type: REAL, description: "Observed or implied futures price per 100 nominal"}
       futures_price_is_implied: {type: BOOLEAN, description: "1 if price was implied from basket, 0 if observed"}
       repo_rate: {type: REAL, description: "Basket-wide default financing rate used to carry bonds to delivery, as a percentage. Implied by the analytics request's basket-wide repo term structure, or the discount curve's own forward rate to delivery when that was unset. A deliverable bond with its own per-bond override (see bond_future_outputs.repo_term_structure_json) may actually have carried at a different rate; bond_future_outputs.repo_rate holds the rate that was really applied to each bond."}

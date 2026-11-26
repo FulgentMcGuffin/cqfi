@@ -95,7 +95,7 @@ class BondFutureBasketOutput:
         bond_future: The contract analysed.
         trade_date: Date the analytics were computed as of.
         settlement_date: Bond settlement implied by the trade date.
-        delivery_date: Last delivery day, which basis is measured to.
+        delivery_date: Business day in the delivery period that basis is measured to.
         futures_price: The price basis was measured against.
         futures_price_is_implied: Whether that price was implied from the
             basket rather than observed.

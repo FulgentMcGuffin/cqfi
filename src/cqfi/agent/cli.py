@@ -184,9 +184,10 @@ HELP_TEXT_CQFI = (
     "\n"
     "Bond future commands:\n"
     "  /dlv <name> <future> [bonds...] [delivery]        — build a delivery basket\n"
-    "  /fut <basket|contract> [date] [repo]              — basis analytics, CTD first\n"
+    "  /fut <basket|contract> [date] [delivery] [repo]   — basis analytics, CTD first\n"
     "    future: exchange code or Bloomberg root (FGBM, OE, IK, ZN, TU, …)\n"
-    "    delivery: M8, U, 6, 2020-09 or U2020 (defaults to front quarterly)\n"
+    "    delivery: for /dlv, M8, U, 6, 2020-09 or U2020 (front quarterly if omitted);\n"
+    "              for /fut, first, last, minmax (default), or YYYY-MM-DD inside the period\n"
     "    bonds: '<id>' or '<id>|<conversion_factor>' to hard-code a factor\n"
     "    repo: applied to every bond in the basket. A number is a flat repo\n"
     "          rate held for every tenor (i.e. for eternity); a JSON object\n"
@@ -197,6 +198,8 @@ HELP_TEXT_CQFI = (
     "              /dlv mine FOA fraapr029|1.0326 frajun030|1.0291 2025-12\n"
     "              /fut IKH7\n"
     "              /fut mybasket 2025-10-15\n"
+    "              /fut IKH7 2026-05-15\n"
+    "              /fut IKH7 2026-05-15 last\n"
     "              /fut IKH7 2026-05-15 3.0\n"
     '              /fut IKH7 2026-05-15 {"3m": 3.0, "1y": 3.2}\n'
     '    Also available in LLM mode: "What is the CTD for the March 2027 BTP future?"\n'
@@ -457,10 +460,16 @@ _FUT_HELP_TEXT = (
     "and net basis, delta, gamma and implied fair futures price for every bond\n"
     "in a delivery basket, ordered cheapest-to-deliver first.\n"
     "\n"
-    "Arguments: /fut <basket_or_contract> [trade_date] [repo]\n"
+    "Arguments: /fut <basket_or_contract> [trade_date] [delivery] [repo]\n"
     "  <basket_or_contract>: a basket named by /dlv, or a contract code (IKH7)\n"
     "  [trade_date]: YYYY-MM-DD (optional; defaults to the latest trade date\n"
     "                held in bond_analytics for the issuer)\n"
+    "  [delivery]: first, last, minmax, or YYYY-MM-DD. minmax (the default)\n"
+    "              is the seller's choice: the business day in the delivery\n"
+    "              period on which a deliverable bond has the lowest net basis.\n"
+    "              A date that is not a business day in that period is an error.\n"
+    "              On a contract with one delivery day, first, last, and minmax\n"
+    "              are that same day.\n"
     "  [repo]: optional repo term structure, applied to every bond in the\n"
     "          basket. A single number is a flat repo rate held for every\n"
     "          tenor (i.e. for eternity); a JSON object maps tenor labels\n"
@@ -471,6 +480,8 @@ _FUT_HELP_TEXT = (
     "Examples:\n"
     "  /fut IKH7                                     — Italian 10Y basket for March 2027\n"
     "  /fut IKH7 2026-05-15                          — the same basket valued on 15 May 2026\n"
+    "  /fut IKH7 2026-05-15 last                     — carry to the last delivery day\n"
+    "  /fut IKH7 2026-05-15 2026-09-10               — carry to an explicit delivery day\n"
     "  /fut mybasket 2025-10-15                      — a basket stored earlier, with its own factors\n"
     "  /fut IKH7 2026-05-15 3.0                      — valued with a flat 3% repo rate\n"
     '  /fut IKH7 2026-05-15 {"3m": 3.0, "1y": 3.2}   — valued with a full repo curve\n'
@@ -981,6 +992,7 @@ async def _run_tool_calls(client: DBClient, calls: list[ToolCall]) -> None:
                     futures_price=call.arguments.get("futures_price"),
                     curve_label=call.arguments.get("curve_label", "BOND_ZERO"),
                     numeric_term_structure=call.arguments.get("numeric_term_structure"),
+                    delivery_date=call.arguments.get("delivery_date"),
                 )
                 print(format_fut_result(result))
             except Exception as exc:

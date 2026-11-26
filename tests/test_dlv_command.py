@@ -174,6 +174,27 @@ def test_fut_repo_term_structure_is_parsed(text, target, trade_date, repo):
     assert result.numeric_term_structure == repo
 
 
+@pytest.mark.parametrize(
+    ("text", "delivery"),
+    [
+        ("/fut IKH7 last", "last"),
+        ("/fut IKH7 2026-05-15 first", "first"),
+        ("/fut IKH7 2026-05-15 MINMAX", "minmax"),
+        ("/fut IKH7 2026-05-15 2026-09-10", "2026-09-10"),
+        ("/fut IKH7 2026-05-15 last 3.0", "last"),
+    ],
+)
+def test_fut_delivery_day_is_parsed(text, delivery):
+    result = parse_fut_command(text)
+    assert result.kind == "analytics"
+    assert result.delivery == delivery
+
+
+def test_fut_without_delivery_leaves_it_unset():
+    assert parse_fut_command("/fut IKH7 2026-05-15").delivery is None
+    assert parse_fut_command("/fut IKH7 2026-05-15 3.0").delivery is None
+
+
 def test_fut_without_repo_leaves_numeric_term_structure_none():
     result = parse_fut_command("/fut IKH7 2026-05-15")
     assert result.kind == "analytics"

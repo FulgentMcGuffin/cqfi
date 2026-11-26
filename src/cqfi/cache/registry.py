@@ -38,6 +38,13 @@ _TABLE_PRIMARY_KEYS: dict[str, str] = {
 }
 _ID_HEX_LEN = 12  # short UUID fragment
 _SEP = "-"
+# Replaced by asw_mm_spread, asw_true_spread, asw_z_spread, asw_proceeds_spread.
+_RETIRED_COLUMNS = (
+    "asw_spread_1m",
+    "asw_spread_3m",
+    "asw_spread_6m",
+    "asw_spread_1y",
+)
 
 
 def short_id() -> str:
@@ -138,6 +145,7 @@ class CacheRegistry:
             conn.execute(
                 f'CREATE TABLE IF NOT EXISTS "{table}" ({col_sql}, PRIMARY KEY ("{pk}"))'
             )
+            self._align_table_columns(table, columns)
         if not self._duckdb:
             conn.commit()
         # Materialize metadata tables. Best-effort: a registry opened against a
@@ -149,6 +157,64 @@ class CacheRegistry:
         # cmt_analytics reads/writes, which is all such callers actually need.
         self._materialize_best_effort(self._materialize_issuers_table)
         self._materialize_best_effort(self._materialize_bond_futures_conventions_table)
+
+    def _physical_columns(self, table: str) -> set[str]:
+        conn = self._conn()
+        if self._duckdb:
+            rows = conn.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = ? AND table_schema = 'main'
+                """,
+                [table],
+            ).fetchall()
+            return {row[0] for row in rows}
+        rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+        return {row[1] for row in rows}
+
+    def _table_indexes(self, table: str) -> list[tuple[str, str]]:
+        """Secondary index ``(name, create_sql)`` pairs. Primary keys are omitted."""
+        conn = self._conn()
+        if self._duckdb:
+            rows = conn.execute(
+                "SELECT index_name, sql FROM duckdb_indexes() WHERE table_name = ?",
+                [table],
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL",
+                (table,),
+            ).fetchall()
+        return [(name, sql) for name, sql in rows if sql]
+
+    def _align_table_columns(self, table: str, columns: dict[str, dict]) -> None:
+        """Add semantics columns missing from an existing table and drop retired ones.
+
+        DuckDB refuses ``DROP COLUMN`` while secondary indexes exist, so those
+        indexes are removed for the drop and then recreated.
+        """
+        existing = self._physical_columns(table)
+        if not existing:
+            return
+        conn = self._conn()
+        for col, meta in columns.items():
+            if col in existing:
+                continue
+            sql_type = _sql_type(meta.get("type", "TEXT"), duckdb=self._duckdb)
+            conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{col}" {sql_type}')
+        retiring = [col for col in _RETIRED_COLUMNS if col in existing]
+        if not retiring:
+            return
+        indexes = self._table_indexes(table)
+        for name, _sql in indexes:
+            conn.execute(f'DROP INDEX IF EXISTS "{name}"')
+        try:
+            for col in retiring:
+                conn.execute(f'ALTER TABLE "{table}" DROP COLUMN "{col}"')
+        finally:
+            for _name, sql in indexes:
+                conn.execute(sql)
 
     def _materialize_best_effort(self, materialize: Callable[[], None]) -> None:
         try:
@@ -472,7 +538,7 @@ class CacheRegistry:
         bond_future = request.bond_future
         convention = bond_future.convention
         trade_date = request.trade_date.isoformat()
-        delivery = request.delivery_date()
+        delivery = result.delivery_date
         basket_output_id = join_id(
             str(bond_future),
             trade_date,

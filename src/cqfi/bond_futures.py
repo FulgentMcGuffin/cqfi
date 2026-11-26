@@ -16,13 +16,13 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from enum import Enum
 
 import QuantLib as ql
 from decorules import HasRulesActions, raise_if_false_on_instance
 
-from cqfi.date_utils import add_months, whole_months_between
+from cqfi.date_utils import add_months, to_ql_date, whole_months_between
 from cqfi.day_of_month import DayOfMonthSpec
 from cqfi.instruments import Bond
 from cqfi.issuers import ISSUERS, IssuerProfile, RepoMarket, resolve_issuer
@@ -872,6 +872,23 @@ class BondFuture:
         return self.convention.delivery_end_date(
             self.delivery_year, self.delivery_month
         )
+
+    def delivery_business_days(self) -> tuple[date, ...]:
+        """Return every issuer business day from the first through the last delivery day.
+
+        Weekends and holidays inside the period are omitted. A contract whose
+        first and last delivery days are the same date yields that one day.
+        """
+        start = self.delivery_start_date()
+        end = self.delivery_end_date()
+        calendar = self.convention.calendar()
+        days: list[date] = []
+        current = start
+        while current <= end:
+            if calendar.isBusinessDay(to_ql_date(current)):
+                days.append(current)
+            current += timedelta(days=1)
+        return tuple(days)
 
     def notional_bond_maturity(self) -> date:
         """Return the maturity of the contract's notional bond.

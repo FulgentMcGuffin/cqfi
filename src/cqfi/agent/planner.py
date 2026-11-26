@@ -131,6 +131,8 @@ class CQFIRulePlanner(RuleBasedPlanner):
                 kwargs = {"target": fut_parsed.target}
                 if fut_parsed.trade_date:
                     kwargs["trade_date"] = fut_parsed.trade_date.isoformat()
+                if fut_parsed.delivery:
+                    kwargs["delivery_date"] = fut_parsed.delivery
                 if fut_parsed.numeric_term_structure is not None:
                     kwargs["numeric_term_structure"] = (
                         fut_parsed.numeric_term_structure

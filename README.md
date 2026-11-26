@@ -61,11 +61,16 @@ size, green exclusion). Build a delivery basket — every eligible bond from
 `bond_universe`, or an explicit list with optional hard-coded conversion
 factors — with `/dlv <name> <future> [bonds...] [delivery]`, then compute
 conversion factor, implied repo rate, gross and net basis, delta, gamma and
-implied fair futures price (cheapest-to-deliver first) with `/fut <basket|contract> [trade_date] [repo]`, or the `build_delivery_basket` /
+implied fair futures price (cheapest-to-deliver first) with `/fut <basket|contract> [trade_date] [delivery] [repo]`, or the `build_delivery_basket` /
 `compute_bond_future_analytics` LLM tools. An optional repo argument — a flat
 rate held for eternity, or a full tenor curve — feeds the carry-to-delivery
 calculation for every bond in the basket; without one, each bond's own
-discount-curve forward rate is used instead. The Python API goes one step
+discount-curve forward rate is used instead. Delivery defaults to `minmax`,
+the seller's choice: the business day in the delivery period on which a
+deliverable bond has the lowest net basis. Pass `first`, `last`, or a
+`YYYY-MM-DD` that is a business day in that period; any other date is an
+error. On a contract with one delivery day, `first`, `last`, and `minmax`
+are that day. The Python API goes one step
 further and lets an individual deliverable bond carry its own repo term
 structure (`DeliveryBasket.add(..., repo_term_structure=...)` /
 `set_repo_term_structure`), overriding the basket-wide curve for that bond only.
@@ -311,12 +316,27 @@ a stored basket or a contract code, cheapest-to-deliver first.
 cqfi> /dlv mybasket FGBM                              # front Euro-Bobl basket
 cqfi> /dlv mine FOA fraapr029|1.0326 frajun030 2025-12 # explicit bonds, one with a hard-coded factor
 
-cqfi> /fut IKH7                                       # latest available trade date
+cqfi> /fut IKH7                                       # latest trade date, seller's delivery day
 cqfi> /fut IKH7 2026-05-15                             # explicit trade date
 cqfi> /fut mybasket 2025-10-15                         # a basket stored earlier by /dlv
+cqfi> /fut IKH7 2026-05-15 last                        # last business day of the period
+cqfi> /fut IKH7 2026-05-15 2026-09-10                  # one business day inside the period
 cqfi> /fut IKH7 2026-05-15 3.0                         # flat 3% repo rate, held for every tenor
+cqfi> /fut IKH7 2026-05-15 last 3.0                    # last delivery day and a flat repo
 cqfi> /fut IKH7 2026-05-15 {"3m": 3.0, "1y": 3.2}      # full repo curve
 ```
+
+`/fut` measures basis to a delivery day inside the contract's delivery period.
+The argument after the trade date is `first`, `last`, `minmax`, or
+`YYYY-MM-DD`. Omitted, it is `minmax`: the business day on which a deliverable
+bond has the lowest net basis. With a quoted futures price that is the lowest
+net basis. With no quoted price, implying the futures price on each day would
+pin that day's cheapest net basis at zero, so the day chosen is the one with
+the lowest implied fair futures price. `first` and `last` are the first and
+last business days of the period. A date that is not a business day in the
+period is an error. On a contract with a single delivery day (Eurex and Osaka),
+`first`, `last`, and `minmax` are that day. Previously every run used the last
+delivery day; `minmax` is now the default for `/fut`, the Python API, and batch.
 
 The optional repo argument on `/fut` is applied to every bond in the delivery
 basket. A bare number is a flat rate held for every tenor (i.e. for
@@ -416,7 +436,8 @@ In LLM mode the agent can call SQL tools **and** fixed-income tools:
 - `compute_cmt_analytics` — calculate CMT analytics for an issuer and composite tenor
 - `build_delivery_basket` — build and name a bond future delivery basket
 - `compute_bond_future_analytics` — basis analytics for a delivery basket, with an
-optional repo rate or term structure
+optional repo rate or term structure and an optional `delivery_date`
+(`first`, `last`, `minmax`, or `YYYY-MM-DD`; default `minmax`)
 - `get_curve` — build a bond, swap or repo curve and return its pillar table
 (rendered as a table and chart in the GUI)
 - `list_curves` — list the swap and repo curves available (optionally on a date)
@@ -529,6 +550,10 @@ cqfi> /batch FGBM HMUZ 2020-01-01 2020-12-31
 | `/batch <issuer> <start> <end>`            | All active bonds for one issuer, each business day in range |
 | `/batch <future> <delivery> <start> <end>` | Dated contracts for one future code and delivery letters    |
 
+
+Bond-future batch cells use the same default delivery day as `/fut`: `minmax`,
+the seller's choice inside each contract's delivery period. There is no batch
+flag to pin `first`, `last`, or a calendar date.
 
 If `/cache on`, successful cells are written to both `bond_analytics_db` and
 `quant_cache_db`; otherwise only `bond_analytics_db`. Query stored batch output
@@ -725,8 +750,10 @@ collection.set_bond_curve("ITA", curve)
 market = QuantlibMarketContext()
 market.set_curve_collection(collection, label="BOND_ZERO")
 
+# delivery defaults to "minmax". Also a date, "YYYY-MM-DD", "first", or "last".
 request = BondFutureInput.from_basket(
     basket, trade_date,
+    delivery="last",
     repo_term_structure=NumericTermStructure({"1d": 3.0}, as_of=trade_date),
 )
 result = QuantLibBondFutureCalculator().compute_bond_future_analytics(request, market)
@@ -750,6 +777,23 @@ print(result.as_json(indent=2))
 | `index`                           | Rank by implied repo rate; `0` is cheapest-to-deliver                                             |
 
 
+`BondFutureInput.delivery` chooses the day those forwards and net bases are
+measured to. It accepts a `date`, a `YYYY-MM-DD` string, or
+`DeliveryDateChoice`: `first`, `last`, or `minmax`. `None` is `minmax`. The
+same values are the `delivery_date` argument of `compute_bond_future_analytics`
+and the token after the trade date on `/fut`.
+
+`minmax` is the seller's choice. The calculator prices every deliverable bond
+on every issuer business day from the first delivery day through the last, and
+keeps the day with the lowest net basis. When `futures_price` is omitted, each
+day's cheapest net basis would be zero by construction, so the day kept is the
+one with the lowest implied fair futures price. Days before the trade date are
+not candidates. A requested date that is not one of those business days raises
+`ValueError` before any pricing. For Eurex and Osaka the period is a single
+day, so `first`, `last`, and `minmax` match. CME and ICE span the delivery
+month, so the default is no longer "always the last business day." Batch runs
+do not take a delivery argument and therefore use `minmax`.
+
 `DeliveryBasket.add(bond, conversion_factor=None, repo_term_structure=None)`
 and `set_repo_term_structure(bond, term_structure)` cover the two per-bond
 overrides; both default to basket-wide behaviour (computed CF, the basket-wide
@@ -757,7 +801,7 @@ repo curve, or the curve-forward fallback) when left unset. The CLI's `/fut`
 repo argument only ever sets the basket-wide curve — per-bond overrides are
 API-only for now.
 
-CLI equivalent: `/dlv myitabasket FBTP` then `/fut myitabasket 2026-05-15 3.0`
+CLI equivalent: `/dlv myitabasket FBTP` then `/fut myitabasket 2026-05-15 last 3.0`
 
 ### Swap and repo curves (Python API)
 
@@ -912,7 +956,7 @@ erDiagram
         TEXT delivery_month
         TEXT trade_date
         TEXT settlement_date
-        TEXT delivery_date
+        TEXT delivery_date "day basis is measured to"
         REAL futures_price
         BOOLEAN futures_price_is_implied
         REAL repo_rate
@@ -958,7 +1002,7 @@ erDiagram
 | `cmt_analytics`              | Curve-priced CMT runs (standalone or as comparables for bonds).                                                          |
 | `bond_analytics`             | Per-bond analytics for a trade/settlement date; optional links to maturity-matched CMT rows.                             |
 | `bond_future_conventions`    | Exchange contract terms (one row per canonical code, e.g. `FBTP`, `ZT`); seeded from `BOND_FUTURE_CONVENTIONS` on merge. |
-| `bond_future_basket_outputs` | One row per `/fut` run — contract, dates, futures price, basket-wide repo.                                               |
+| `bond_future_basket_outputs` | One row per `/fut` run — contract, dates, futures price, basket-wide repo. `delivery_date` is the business day basis was measured to (`minmax` unless the request named another day). |
 | `bond_future_outputs`        | Per-deliverable basis metrics within a basket, ranked cheapest-to-deliver first.                                         |
 
 
@@ -1079,7 +1123,9 @@ dated `BondFuture`, checked against the contract's `BasketRestrictions`, with
 optional per-bond conversion-factor and repo-term-structure overrides.
 - `QuantLibBondFutureCalculator.compute_bond_future_analytics` returns a
 `BondFutureBasketOutput` (per-bond `BondFutureOutput`s, cheapest-to-deliver
-first) and, when `use_quant_cache` is enabled, persists rows to
+first). Basis is measured to `BondFutureInput.delivery` (`first`, `last`,
+`minmax`, or a business day in the delivery period; default `minmax`) and,
+when `use_quant_cache` is enabled, persists rows to
 `bond_future_basket_outputs` / `bond_future_outputs` in `quant_cache_db`.
 On exit with `/save_cache on`, those rows merge into `bond_analytics_db`
 (conventions upserted from `BOND_FUTURE_CONVENTIONS`).

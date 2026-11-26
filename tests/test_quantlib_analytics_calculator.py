@@ -9,6 +9,7 @@ import pytest
 import QuantLib as ql
 
 from cqfi.analytics_input import BondAnalyticsInput, CmtAnalyticsInput
+from cqfi.curve_keys import SwapCurveKey
 from cqfi.issuers import ISSUERS, RateType
 from cqfi.numeric_term_structure import NumericTermStructure
 from cqfi.quantlib.quantlib_analytics_calculator import (
@@ -19,8 +20,9 @@ from cqfi.quantlib.quantlib_analytics_calculator import (
     _tenor_label_to_years,
     _to_ql_date,
 )
-from cqfi.quantlib.quantlib_curve import ql_build_zero_curve
+from cqfi.quantlib.quantlib_curve import ql_build_swap_curve, ql_build_zero_curve
 from cqfi.quantlib.quantlib_market_context import (
+    SWAP_PAR_LABEL,
     QuantLibCurveCollection,
     QuantlibMarketContext,
 )
@@ -487,4 +489,126 @@ def test_compute_cmt_analytics_requires_market(calculator):
     request = CmtAnalyticsInput.from_string("DEU", "5y", trade_date=_VAL_DATE)
     with pytest.raises(ValueError, match="market is required"):
         calculator.compute_cmt_analytics(request, None)
+
+
+def _flat_eur_swap_market(bond_rates: pl.DataFrame) -> QuantlibMarketContext:
+    market = _market_for(_DEU, bond_rates)
+    handle, _ = ql_build_swap_curve(
+        SwapCurveKey("EUR", "6M", "1Y"),
+        _VAL_DATE,
+        pl.DataFrame(
+            {
+                "tenor_label": ["6M", "1Y", "2Y", "5Y", "10Y", "30Y"],
+                "tenor_years": [0.5, 1.0, 2.0, 5.0, 10.0, 30.0],
+                "rate_pct": [_FLAT_RATE_PCT] * 6,
+            }
+        ),
+    )
+    collection = QuantLibCurveCollection(as_of=_VAL_DATE)
+    collection.set_swap_curve(SwapCurveKey("EUR", "6M", "1Y"), handle)
+    market.set_curve_collection(collection, label=SWAP_PAR_LABEL)
+    return market
+
+
+def test_asw_spreads_near_zero_when_bond_is_priced_on_the_swap_curve(calculator):
+    market = _flat_eur_swap_market(_FLAT_RATES)
+    issuer = ISSUERS["DEU"]
+    bond = calculator._build_fixed_rate_bond(issuer, _bond_request(coupon=_FLAT_RATE_PCT))
+    swap = market.curve_collection(SWAP_PAR_LABEL).swap_curve(
+        SwapCurveKey("EUR", "6M", "1Y")
+    )
+    ql.Settings.instance().evaluationDate = _to_ql_date(_VAL_DATE)
+    bond.setPricingEngine(ql.DiscountingBondEngine(swap))
+    spreads = calculator._asw_spreads(
+        bond,
+        issuer,
+        market=market,
+        ytm_pct=bond.bondYield(issuer.day_count, ql.Compounded, issuer.frequency) * 100.0,
+        clean=bond.cleanPrice(),
+    )
+    for name in (
+        "asw_mm_spread",
+        "asw_true_spread",
+        "asw_z_spread",
+        "asw_proceeds_spread",
+    ):
+        assert spreads[name] == pytest.approx(0.0, abs=1e-3)
+
+
+def test_compute_bond_analytics_fills_asw_spreads_when_swap_curve_is_registered(calculator):
+    market = _flat_eur_swap_market(_FLAT_RATES)
+    result, _, _ = calculator.compute_bond_analytics(
+        _bond_request(coupon=_FLAT_RATE_PCT),
+        market,
+    )
+    assert result.asw_mm_spread is not None
+    assert result.asw_true_spread is not None
+    assert result.asw_z_spread is not None
+    assert result.asw_proceeds_spread is not None
+
+
+def test_asw_true_spread_depends_on_coupon_at_the_same_yield(calculator):
+    market = _flat_eur_swap_market(_FLAT_RATES)
+    low, _, _ = calculator.compute_bond_analytics(
+        _bond_request(coupon=2.0, input_column="yield_to_maturity", input_value=5.0),
+        market,
+    )
+    high, _, _ = calculator.compute_bond_analytics(
+        _bond_request(coupon=6.0, input_column="yield_to_maturity", input_value=5.0),
+        market,
+    )
+    assert low.asw_mm_spread == pytest.approx(high.asw_mm_spread, abs=1e-4)
+    assert low.asw_mm_spread == pytest.approx(1.0, abs=0.05)
+    assert low.asw_true_spread != pytest.approx(high.asw_true_spread, abs=1e-2)
+
+
+def test_asw_z_spread_positive_when_bond_is_one_point_cheap(calculator):
+    market = _flat_eur_swap_market(_FLAT_RATES)
+    fair, _, _ = calculator.compute_bond_analytics(
+        _bond_request(coupon=_FLAT_RATE_PCT),
+        market,
+    )
+    cheap, _, _ = calculator.compute_bond_analytics(
+        _bond_request(
+            coupon=_FLAT_RATE_PCT,
+            input_column="clean_price",
+            input_value=fair.clean_price - 1.0,
+        ),
+        market,
+    )
+    assert fair.asw_z_spread is not None
+    assert cheap.asw_z_spread is not None
+    assert cheap.asw_z_spread > 0.0
+    assert cheap.asw_z_spread - fair.asw_z_spread > 0.05
+
+
+def test_asw_proceeds_spread_depends_on_coupon_at_the_same_yield(calculator):
+    market = _flat_eur_swap_market(_FLAT_RATES)
+    low, _, _ = calculator.compute_bond_analytics(
+        _bond_request(coupon=2.0, input_column="yield_to_maturity", input_value=5.0),
+        market,
+    )
+    high, _, _ = calculator.compute_bond_analytics(
+        _bond_request(coupon=6.0, input_column="yield_to_maturity", input_value=5.0),
+        market,
+    )
+    assert low.asw_mm_spread == pytest.approx(high.asw_mm_spread, abs=1e-4)
+    assert low.asw_proceeds_spread != pytest.approx(high.asw_proceeds_spread, abs=1e-2)
+    assert low.asw_proceeds_spread != pytest.approx(low.asw_true_spread, abs=1e-2)
+    assert high.asw_proceeds_spread != pytest.approx(high.asw_true_spread, abs=1e-2)
+
+
+def test_asw_spreads_absent_when_no_swap_curve(deu_flat_market, calculator, monkeypatch):
+    monkeypatch.setattr(
+        "cqfi.quantlib.quantlib_analytics_calculator.list_rate_curve_keys",
+        lambda *args, **kwargs: [],
+    )
+    result, _, _ = calculator.compute_bond_analytics(
+        _bond_request(coupon=_FLAT_RATE_PCT),
+        deu_flat_market,
+    )
+    assert result.asw_mm_spread is None
+    assert result.asw_true_spread is None
+    assert result.asw_z_spread is None
+    assert result.asw_proceeds_spread is None
 

@@ -9,17 +9,31 @@ import QuantLib as ql
 from cqfi.analytics_input import BondAnalyticsInput, CmtAnalyticsInput
 from cqfi.analytics_output import FixedIncomeAnalyticsOutput
 from cqfi.cache.decorators import cache_bond_analytics, cache_cmt_analytics
+from cqfi.config import get_settings
+from cqfi.curve_keys import SwapCurveKey, ql_period
+from cqfi.data.rates_loader import SWAP_TABLE, list_rate_curve_keys
 from cqfi.date_utils import (
     from_ql_date as _from_ql_date,
     to_ql_date as _to_ql_date,
 )
 from cqfi.issuers import IssuerProfile, resolve_issuer
-from cqfi.quantlib.quantlib_market_context import QuantlibMarketContext
 from cqfi.numeric_term_structure import NumericTermStructure
+from cqfi.quantlib.quantlib_market_context import (
+    REPO_RFR_LABEL,
+    SWAP_PAR_LABEL,
+    QuantlibMarketContext,
+)
+from cqfi.rate_conventions import resolve_currency_conventions
 from cqfi.tenor import Tenor
 from cqfi.ycs_tenors import TENOR_COLUMN_TO_YEARS, label_to_column
 
 _INPUT_PRICE_FIELDS = frozenset({"clean_price", "yield_to_maturity"})
+_ASW_FIELDS = (
+    "asw_mm_spread",
+    "asw_true_spread",
+    "asw_z_spread",
+    "asw_proceeds_spread",
+)
 _ROLL_TENORS: tuple[tuple[str, Tenor], ...] = (
     ("1m", Tenor.parse("1m")),
     ("3m", Tenor.parse("3m")),
@@ -110,7 +124,12 @@ class QuantLibAnalyticsCalculator:
 
         if not use_curve:
             metrics = self._bond_metrics_from_input(
-                qlbond, issuer, settlement, request.input_column, request.input_value
+                qlbond,
+                issuer,
+                settlement,
+                request.input_column,
+                request.input_value,
+                market=market,
             )
             return metrics, None, None
 
@@ -126,6 +145,7 @@ class QuantLibAnalyticsCalculator:
             coupon_pct=request.coupon,
             face_amount=request.face_amount,
             repo_term_structure=request.repo_term_structure,
+            market=market,
         )
 
         cmt_issuer = issuer.as_unadjusted()
@@ -149,6 +169,7 @@ class QuantLibAnalyticsCalculator:
                 coupon_pct=metrics.par_yield,
                 face_amount=request.face_amount,
                 repo_term_structure=None,
+                market=market,
             )
 
         fc_cmt_bond = self._build_maturity_matched_cmt(
@@ -169,6 +190,7 @@ class QuantLibAnalyticsCalculator:
             coupon_pct=request.coupon,
             face_amount=request.face_amount,
             repo_term_structure=None,
+            market=market,
         )
         return metrics, cmt_metrics, fc_cmt_metrics
 
@@ -460,6 +482,234 @@ class QuantLibAnalyticsCalculator:
                 rolls[f"roll_{label}_fwdyield"] = spot_yld_pct - forward_yld
         return rolls
 
+    def _asw_spreads(
+        self,
+        bond: ql.Bond,
+        issuer: IssuerProfile,
+        *,
+        market: QuantlibMarketContext | None,
+        ytm_pct: float,
+        clean: float,
+    ) -> dict[str, float | None]:
+        """Matched-maturity, par/par, z, and proceeds asset-swap spreads.
+
+        Definitions follow the first four measures in ``resource/ASW.pdf``.
+        All four are in percent.  Forwards come from the currency swap curve.
+        Discount factors come from the repo curve when that swap was
+        bootstrapped dual-curve, and from the swap curve otherwise.  The
+        proceeds spread uses the dirty price as the floating notional
+        (nominal bonds; no CPI uplift).  Missing or ambiguous swap data
+        leaves every field ``None``.
+        """
+        empty: dict[str, float | None] = dict.fromkeys(_ASW_FIELDS)
+        saved = ql.Settings.instance().evaluationDate
+        try:
+            try:
+                curves = self._asw_curves(market, issuer.currency)
+            except (LookupError, ValueError, KeyError, OSError, RuntimeError):
+                return empty
+            ql.Settings.instance().evaluationDate = saved
+            if curves is None:
+                return empty
+            key, projection, discount = curves
+            par_swap = self._matched_par_swap_rate_pct(
+                bond.maturityDate(), key, projection, discount
+            )
+            if par_swap is not None:
+                empty["asw_mm_spread"] = ytm_pct - par_swap
+            empty["asw_true_spread"] = self._asset_swap_spread_pct(
+                bond, clean, key, projection, discount, par_notional=True
+            )
+            empty["asw_proceeds_spread"] = self._asset_swap_spread_pct(
+                bond, clean, key, projection, discount, par_notional=False
+            )
+            empty["asw_z_spread"] = self._swap_z_spread_pct(bond, clean, discount)
+            return empty
+        finally:
+            ql.Settings.instance().evaluationDate = saved
+
+    def _asw_curves(
+        self,
+        market: QuantlibMarketContext | None,
+        currency: str,
+    ) -> tuple[SwapCurveKey, ql.YieldTermStructureHandle, ql.YieldTermStructureHandle] | None:
+        """Return ``(swap key, projection, discount)`` or ``None`` when unresolved."""
+        if market is None or market.as_of is None:
+            return None
+        key = self._registered_swap_key(market, currency)
+        if key is None:
+            as_of = market.as_of.date() if isinstance(market.as_of, datetime) else market.as_of
+            keys = list_rate_curve_keys(
+                get_settings().ycs_db_path, SWAP_TABLE, as_of, currency
+            )
+            if len(keys) != 1:
+                return None
+            key = keys[0]
+            projection = market.ensure_swap_curve(key)
+        else:
+            projection = market.curve_collection(SWAP_PAR_LABEL).swap_curve(key)
+        return key, projection, self._asw_discount_curve(market, key, projection)
+
+    def _registered_swap_key(
+        self, market: QuantlibMarketContext, currency: str
+    ) -> SwapCurveKey | None:
+        try:
+            keys = [
+                key
+                for key in market.curve_collection(SWAP_PAR_LABEL).swap_curve_keys()
+                if key.currency == currency
+            ]
+        except KeyError:
+            return None
+        if len(keys) == 1:
+            return keys[0]
+        return None
+
+    def _asw_discount_curve(
+        self,
+        market: QuantlibMarketContext,
+        key: SwapCurveKey,
+        projection: ql.YieldTermStructureHandle,
+    ) -> ql.YieldTermStructureHandle:
+        """Repo discount curve when the swap was built dual-curve, else *projection*."""
+        try:
+            repo_keys = market.curve_collection(REPO_RFR_LABEL).repo_curve_keys()
+        except KeyError:
+            return projection
+        matched = [
+            repo
+            for repo in repo_keys
+            if repo.currency == key.currency and repo.index == key.index
+        ]
+        if not matched:
+            return projection
+        return market.curve_collection(REPO_RFR_LABEL).repo_curve(matched[0])
+
+    def _ibor_index(
+        self,
+        key: SwapCurveKey,
+        projection: ql.YieldTermStructureHandle,
+    ) -> ql.IborIndex:
+        conv = resolve_currency_conventions(key.currency)
+        return ql.IborIndex(
+            f"{conv.ccy}-{key.float_period}",
+            ql_period(key.float_period),
+            conv.settlement_days,
+            conv.ql_currency(),
+            conv.calendar(),
+            conv.business_convention,
+            False,
+            conv.float_day_count,
+            projection,
+        )
+
+    def _matched_par_swap_rate_pct(
+        self,
+        maturity: ql.Date,
+        key: SwapCurveKey,
+        projection: ql.YieldTermStructureHandle,
+        discount: ql.YieldTermStructureHandle,
+    ) -> float | None:
+        """Par swap rate to *maturity*, in percent."""
+        try:
+            conv = resolve_currency_conventions(key.currency)
+            calendar = conv.calendar()
+            start = calendar.advance(
+                ql.Settings.instance().evaluationDate,
+                conv.settlement_days,
+                ql.Days,
+                conv.business_convention,
+            )
+            if maturity <= start:
+                return None
+            fixed_schedule = ql.Schedule(
+                start,
+                maturity,
+                ql_period(key.fixed_period),
+                calendar,
+                conv.business_convention,
+                conv.business_convention,
+                ql.DateGeneration.Forward,
+                False,
+            )
+            float_schedule = ql.Schedule(
+                start,
+                maturity,
+                ql_period(key.float_period),
+                calendar,
+                conv.business_convention,
+                conv.business_convention,
+                ql.DateGeneration.Forward,
+                False,
+            )
+            swap = ql.VanillaSwap(
+                ql.VanillaSwap.Payer,
+                100.0,
+                fixed_schedule,
+                0.01,
+                conv.fixed_day_count,
+                float_schedule,
+                self._ibor_index(key, projection),
+                0.0,
+                conv.float_day_count,
+            )
+            swap.setPricingEngine(ql.DiscountingSwapEngine(discount))
+            return swap.fairRate() * 100.0
+        except RuntimeError:
+            return None
+
+    def _asset_swap_spread_pct(
+        self,
+        bond: ql.Bond,
+        clean: float,
+        key: SwapCurveKey,
+        projection: ql.YieldTermStructureHandle,
+        discount: ql.YieldTermStructureHandle,
+        *,
+        par_notional: bool,
+    ) -> float | None:
+        """Par/par spread when *par_notional* is true, otherwise the proceeds spread."""
+        try:
+            conv = resolve_currency_conventions(key.currency)
+            asset_swap = ql.AssetSwap(
+                True,
+                bond,
+                clean,
+                self._ibor_index(key, projection),
+                0.0,
+                ql.Schedule(),
+                conv.float_day_count,
+                par_notional,
+            )
+            asset_swap.setPricingEngine(ql.DiscountingSwapEngine(discount))
+            return asset_swap.fairSpread() * 100.0
+        except RuntimeError:
+            return None
+
+    def _swap_z_spread_pct(
+        self,
+        bond: ql.Bond,
+        clean: float,
+        discount: ql.YieldTermStructureHandle,
+    ) -> float | None:
+        """Semiannual z-spread of *bond* to *discount*, in percent.
+
+        Discount factors follow ``(1 + (r(t) + s) / 2) ** (-2t)``.
+        """
+        try:
+            return (
+                ql.BondFunctions.zSpread(
+                    bond,
+                    ql.BondPrice(clean, ql.BondPrice.Clean),
+                    discount.currentLink(),
+                    ql.Compounded,
+                    ql.Semiannual,
+                )
+                * 100.0
+            )
+        except RuntimeError:
+            return None
+
     def _bond_metrics_from_priced_bond(
         self,
         bond: ql.Bond,
@@ -474,6 +724,7 @@ class QuantLibAnalyticsCalculator:
         face_amount: float = 100.0,
         zero_coupon: bool = False,
         repo_term_structure: NumericTermStructure | None = None,
+        market: QuantlibMarketContext | None = None,
     ) -> FixedIncomeAnalyticsOutput:
         bond_settlement = _bond_settlement(issuer, settlement)
         clean = bond.cleanPrice()
@@ -596,6 +847,13 @@ class QuantLibAnalyticsCalculator:
             for label in _carry_labels
             for kind in ("spotyield", "fwdyield")
         }
+        asw = self._asw_spreads(
+            bond,
+            issuer,
+            market=market,
+            ytm_pct=yld * 100.0,
+            clean=clean,
+        )
 
         return FixedIncomeAnalyticsOutput(
             yield_to_maturity=yld * 100.0,
@@ -621,6 +879,7 @@ class QuantLibAnalyticsCalculator:
             carry_1y=carry_1y,
             **rolls,
             **carry_rolls,
+            **asw,
         )
 
     def _bond_metrics_from_input(
@@ -632,6 +891,7 @@ class QuantLibAnalyticsCalculator:
         input_value: float | None,
         *,
         include_accrued: bool = True,
+        market: QuantlibMarketContext | None = None,
     ) -> FixedIncomeAnalyticsOutput:
         if input_column not in _INPUT_PRICE_FIELDS:
             raise ValueError(
@@ -666,6 +926,13 @@ class QuantLibAnalyticsCalculator:
         )
         convexity = ql.BondFunctions.convexity(bond, yld, dc, comp, freq, settlement)
         bpv = ql.BondFunctions.basisPointValue(bond, yld, dc, comp, freq, settlement)
+        asw = self._asw_spreads(
+            bond,
+            issuer,
+            market=market,
+            ytm_pct=yld * 100.0,
+            clean=clean,
+        )
 
         return FixedIncomeAnalyticsOutput(
             yield_to_maturity=yld * 100.0,
@@ -678,6 +945,7 @@ class QuantLibAnalyticsCalculator:
             gamma_sensitivity=(
                 convexity * clean / 100.0 if convexity is not None else None
             ),
+            **asw,
         )
 
     @cache_cmt_analytics
@@ -752,4 +1020,5 @@ class QuantLibAnalyticsCalculator:
             coupon_pct=par_yield,
             face_amount=100.0,
             repo_term_structure=None,
+            market=market,
         )

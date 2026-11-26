@@ -34,10 +34,10 @@ ANALYTICS_METRIC_FIELDS: tuple[str, ...] = (
     "carry_roll_3m",
     "carry_roll_6m",
     "carry_roll_1y",
-    "asw_spread_1m",
-    "asw_spread_3m",
-    "asw_spread_6m",
-    "asw_spread_1y",
+    "asw_mm_spread",
+    "asw_true_spread",
+    "asw_z_spread",
+    "asw_proceeds_spread",
 )
 
 
@@ -50,8 +50,12 @@ class FixedIncomeAnalyticsOutput:
     optional because a given run may only populate a subset; unset fields are
     ``None``.
 
-    Percent fields (yield, price, duration, carry, roll, etc.) are expressed
-    in percent (e.g. ``4.25`` means 4.25%).  ``z_spread`` is in basis points.
+    Percent fields (yield, price, duration, carry, roll, and the asset-swap
+    spreads) are expressed in percent (e.g. ``4.25`` means 4.25%).  ``z_spread``
+    is in basis points.  The asset-swap spreads follow the first four measures
+    in ``resource/ASW.pdf``: matched-maturity yield (``asw_mm_spread``), par/par
+    (``asw_true_spread``), swap-curve z-spread (``asw_z_spread``), and proceeds
+    (``asw_proceeds_spread``).
     """
 
     yield_to_maturity: float | None = None
@@ -93,10 +97,10 @@ class FixedIncomeAnalyticsOutput:
     carry_roll_3m_fwdyield: float | None = None
     carry_roll_6m_fwdyield: float | None = None
     carry_roll_1y_fwdyield: float | None = None
-    asw_spread_1m: float | None = None
-    asw_spread_3m: float | None = None
-    asw_spread_6m: float | None = None
-    asw_spread_1y: float | None = None
+    asw_mm_spread: float | None = None
+    asw_true_spread: float | None = None
+    asw_z_spread: float | None = None
+    asw_proceeds_spread: float | None = None
 
     def as_dict(self, only_populated: bool = True) -> dict[str, float]:
         """Return populated metrics only (non-``None`` values)."""

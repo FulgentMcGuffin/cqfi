@@ -854,6 +854,7 @@ def compute_bond_future_analytics(
     futures_price: float | None = None,
     curve_label: str = "BOND_ZERO",
     numeric_term_structure: dict[str, float] | float | None = None,
+    delivery_date: str | None = None,
 ) -> dict:
     """Compute basis analytics for a bond future delivery basket.
 
@@ -874,6 +875,11 @@ def compute_bond_future_analytics(
             labels such as "3m" to rates in percent, or a single number
             treated as a flat repo rate held for every tenor (i.e. for
             eternity).
+        delivery_date: Day basis is measured to. One of first, last, minmax,
+            or YYYY-MM-DD. Defaults to minmax, the business day in the
+            delivery period on which a deliverable bond has the lowest net
+            basis. A date outside that period is an error. On a contract
+            with one delivery day, first, last, and minmax are that day.
 
     Returns:
         Dictionary with status and the per-bond analytics when successful.
@@ -911,6 +917,7 @@ def compute_bond_future_analytics(
         request = BondFutureInput.from_basket(
             basket,
             resolved_date,
+            delivery=delivery_date,
             repo_term_structure=repo_term_structure,
             curve_label=curve_label,
             futures_price=futures_price,
@@ -923,6 +930,7 @@ def compute_bond_future_analytics(
             "target": target,
             "contract": str(basket.bond_future),
             "date": resolved_date.isoformat(),
+            "delivery_date": result.delivery_date.isoformat(),
             "curve_label": curve_label,
             "futures_price": result.futures_price,
             "futures_price_is_implied": result.futures_price_is_implied,
@@ -931,7 +939,8 @@ def compute_bond_future_analytics(
             "dataframe": result.to_polars(),
             "message": (
                 f"{len(result)} deliverable bond(s) for {basket.bond_future} on "
-                f"{resolved_date}; CTD net basis "
+                f"{resolved_date}, delivery {result.delivery_date.isoformat()}; "
+                f"CTD net basis "
                 f"{result.ctd().net_basis:.6f}"
             ),
         }
@@ -994,6 +1003,7 @@ def execute_fut_command(text: str) -> dict | None:
         parsed.target,
         trade_date=parsed.trade_date.isoformat() if parsed.trade_date else None,
         numeric_term_structure=parsed.numeric_term_structure,
+        delivery_date=parsed.delivery,
     )
 
 
@@ -1010,7 +1020,8 @@ def format_fut_result(result: dict) -> str:
         return f"Error: {result.get('message', result)}"
     implied = " (implied)" if result["futures_price_is_implied"] else ""
     return (
-        f"{result['contract']} on {result['date']} — futures price "
+        f"{result['contract']} on {result['date']}, delivery "
+        f"{result['delivery_date']} — futures price "
         f"{result['futures_price']:.6f}{implied}, CTD {result['ctd']}\n\n"
         f"{result['dataframe']}"
     )

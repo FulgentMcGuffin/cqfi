@@ -41,11 +41,14 @@ _FUT_RE = re.compile(
     r"^/fut(?:\s+(?P<rest>.*))?$",
     re.IGNORECASE | re.DOTALL,
 )
-# "<target> [trade_date] [repo]" for /fut, where repo is a bare number (a
-# flat repo rate) or a JSON object mapping tenor labels to rates in percent.
+# "<target> [trade_date] [delivery] [repo]" for /fut. delivery is first, last,
+# minmax, or a YYYY-MM-DD inside the contract's delivery period. repo is a
+# bare number (a flat repo rate) or a JSON object mapping tenor labels to
+# rates in percent.
 _FUT_ARGS_RE = re.compile(
     r"^(?P<target>\S+)"
     r"(?:\s+(?P<trade_date>\d{4}-\d{2}-\d{2}))?"
+    r"(?:\s+(?P<delivery>first|last|minmax|\d{4}-\d{2}-\d{2}))?"
     r"(?:\s+(?P<repo>-?[0-9]*\.?[0-9]+|\{.*\}))?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
@@ -430,6 +433,8 @@ class FutParseResult:
         kind: ``"help"``, ``"invalid"`` or ``"analytics"``.
         target: A stored basket name or a contract code such as ``IKH7``.
         trade_date: Trade date to run analytics on, if supplied.
+        delivery: Delivery day inside the contract period: ``first``, ``last``,
+            ``minmax``, or ``YYYY-MM-DD``. Omitted means the seller's choice.
         numeric_term_structure: Optional repo input, applied to every
             deliverable bond in the basket. A single number is a flat repo
             rate held for every tenor (i.e. for eternity); a ``dict`` maps
@@ -441,6 +446,7 @@ class FutParseResult:
     kind: Literal["help", "invalid", "analytics"]
     target: str | None = None
     trade_date: date | None = None
+    delivery: str | None = None
     numeric_term_structure: dict[str, float] | float | None = None
     message: str | None = None
 
@@ -542,11 +548,14 @@ def parse_fut_command(text: str) -> FutParseResult | None:
 
     Supported forms::
 
-        /fut IKH7                            # latest available trade date
+        /fut IKH7                            # latest trade date, seller's delivery
         /fut IKH7 2026-05-15                 # explicit trade date
         /fut mybasket 2025-10-15             # a basket stored earlier by /dlv
+        /fut IKH7 2026-05-15 last            # last business day of the period
+        /fut IKH7 2026-05-15 2026-09-10      # an explicit delivery day
         /fut IKH7 3.0                        # flat 3% repo, latest trade date
         /fut IKH7 2026-05-15 3.0             # flat 3% repo on a trade date
+        /fut IKH7 2026-05-15 last 3.0        # last delivery day and a flat repo
         /fut IKH7 2026-05-15 {"3m": 3.0, "1y": 3.2}   # full repo curve
 
     A repo argument, when supplied, is applied to every deliverable bond in
@@ -574,8 +583,9 @@ def parse_fut_command(text: str) -> FutParseResult | None:
             kind="invalid",
             message=(
                 "/fut takes a basket name or contract code, an optional "
-                "trade date (YYYY-MM-DD), and an optional repo rate or term "
-                "structure (a number, or a JSON tenor:rate map)."
+                "trade date (YYYY-MM-DD), an optional delivery day "
+                "(first, last, minmax, or YYYY-MM-DD), and an optional repo "
+                "rate or term structure (a number, or a JSON tenor:rate map)."
             ),
         )
 
@@ -588,6 +598,10 @@ def parse_fut_command(text: str) -> FutParseResult | None:
             trade_date = date.fromisoformat(trade_date_str)
         except ValueError as exc:
             return FutParseResult(kind="invalid", message=str(exc))
+
+    delivery = args_match.group("delivery")
+    if delivery:
+        delivery = delivery.lower()
 
     numeric_term_structure: dict[str, float] | float | None = None
     repo_str = args_match.group("repo")
@@ -614,6 +628,7 @@ def parse_fut_command(text: str) -> FutParseResult | None:
         kind="analytics",
         target=target,
         trade_date=trade_date,
+        delivery=delivery,
         numeric_term_structure=numeric_term_structure,
     )
 

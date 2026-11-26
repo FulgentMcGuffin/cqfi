@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import QuantLib as ql
 import pytest
@@ -116,6 +116,32 @@ def test_trade_date_after_delivery_is_rejected(basket):
         BondFutureInput(
             delivery_basket=basket, bond_future=FBTP_U6, trade_date=date(2027, 1, 1)
         )
+
+
+def test_illegal_delivery_date_is_rejected(basket):
+    with pytest.raises(ValueError, match="not a business day"):
+        BondFutureInput(
+            delivery_basket=basket,
+            bond_future=FBTP_U6,
+            trade_date=TRADE_DATE,
+            delivery=date(2026, 9, 11),
+        )
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        BondFutureInput(
+            delivery_basket=basket,
+            bond_future=FBTP_U6,
+            trade_date=TRADE_DATE,
+            delivery="middle",
+        )
+
+
+def test_single_delivery_day_choices_agree(basket, market, flat_repo):
+    results = [
+        _analyse(basket, market, repo_term_structure=flat_repo, delivery=choice)
+        for choice in (None, "minmax", "first", "last", "2026-09-10", date(2026, 9, 10))
+    ]
+    assert {result.delivery_date for result in results} == {date(2026, 9, 10)}
+    assert results[0].ctd().net_basis == pytest.approx(results[-1].ctd().net_basis)
 
 
 @pytest.mark.parametrize(
@@ -418,6 +444,129 @@ def test_domestic_and_international_jgb_repo_bases_differ():
     assert domestic.ctd().implied_repo_rate == pytest.approx(
         international.ctd().implied_repo_rate * 365.0 / 360.0, rel=1e-9
     )
+
+
+# --------------------------------------------------------------------------- #
+# Seller's choice of delivery day
+# --------------------------------------------------------------------------- #
+def _gilt_market() -> QuantlibMarketContext:
+    ql.Settings.instance().evaluationDate = to_ql_date(TRADE_DATE)
+    curve = ql.YieldTermStructureHandle(
+        ql.FlatForward(
+            to_ql_date(TRADE_DATE),
+            FLAT_RATE,
+            ql.ActualActual(ql.ActualActual.ISDA),
+            ql.Compounded,
+            ql.Semiannual,
+        )
+    )
+    collection = QuantLibCurveCollection(TRADE_DATE)
+    collection.set_bond_curve("GBR", curve)
+    context = QuantlibMarketContext()
+    context.set_curve_collection(collection, label="BOND_ZERO")
+    return context
+
+
+def _gilt_basket() -> tuple[BondFuture, DeliveryBasket]:
+    future = BondFuture(BOND_FUTURE_CONVENTIONS["R"], 9, 2026)
+    earliest, latest = future.convention.restrictions.remaining_maturity.bounds(
+        future.delivery_end_date()
+    )
+    assert earliest is not None and latest is not None
+    basket = DeliveryBasket(bond_future=future)
+    for offset, coupon in ((60, 2.0), (240, 6.0)):
+        maturity = earliest + timedelta(days=offset)
+        assert maturity <= latest
+        basket.add(
+            Bond(
+                issuer="GBR",
+                maturity=maturity,
+                bond_id=f"GB{maturity:%Y%m%d}",
+                user_friendly_id=f"gbr{maturity:%Y%m%d}",
+                coupon=coupon,
+                issue_date=date(2016, 3, 7),
+            )
+        )
+    return future, basket
+
+
+def _cheapest_delivery_day(future, basket, market, *, futures_price: float | None):
+    """Earliest business day that minimises the seller's delivery cost.
+
+    With a quoted futures price that cost is net basis. With no quoted price
+    it is the implied fair futures price, because implying the price on each
+    day separately pins that day's cheapest net basis at zero.
+    """
+    calculator = QuantLibBondFutureCalculator()
+    best_day = None
+    best_score = None
+    for day in future.delivery_business_days():
+        result = calculator.compute_bond_future_analytics(
+            BondFutureInput(
+                delivery_basket=basket,
+                bond_future=future,
+                trade_date=TRADE_DATE,
+                delivery=day,
+                futures_price=futures_price,
+            ),
+            market,
+        )
+        if futures_price is None:
+            score = min(output.implied_fair_futures_price for output in result.outputs)
+        else:
+            score = min(output.net_basis for output in result.outputs)
+        if best_score is None or score < best_score:
+            best_score = score
+            best_day = day
+    return best_day
+
+
+def test_minmax_selects_the_day_with_the_lowest_net_basis():
+    future, basket = _gilt_basket()
+    market = _gilt_market()
+    assert len(future.delivery_business_days()) > 1
+    for futures_price in (120.0, None):
+        expected = _cheapest_delivery_day(
+            future, basket, market, futures_price=futures_price
+        )
+        result = QuantLibBondFutureCalculator().compute_bond_future_analytics(
+            BondFutureInput(
+                delivery_basket=basket,
+                bond_future=future,
+                trade_date=TRADE_DATE,
+                futures_price=futures_price,
+            ),
+            market,
+        )
+        assert result.delivery_date == expected
+
+
+def test_first_and_last_are_the_ends_of_the_delivery_period():
+    future, basket = _gilt_basket()
+    market = _gilt_market()
+    calculator = QuantLibBondFutureCalculator()
+    first = calculator.compute_bond_future_analytics(
+        BondFutureInput(
+            delivery_basket=basket,
+            bond_future=future,
+            trade_date=TRADE_DATE,
+            delivery="first",
+        ),
+        market,
+    )
+    last = calculator.compute_bond_future_analytics(
+        BondFutureInput(
+            delivery_basket=basket,
+            bond_future=future,
+            trade_date=TRADE_DATE,
+            delivery="last",
+        ),
+        market,
+    )
+    days = future.delivery_business_days()
+    assert first.delivery_date == days[0]
+    assert last.delivery_date == days[-1]
+    assert first.delivery_date != last.delivery_date
 
 
 # --------------------------------------------------------------------------- #
