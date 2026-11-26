@@ -914,6 +914,10 @@ erDiagram
         REAL clean_price
         REAL duration
         REAL convexity
+        REAL asw_mm_spread
+        REAL asw_true_spread
+        REAL asw_z_spread
+        REAL asw_proceeds_spread
     }
 
     bond_analytics {
@@ -932,6 +936,10 @@ erDiagram
         REAL convexity
         REAL z_spread
         REAL carry_roll "1m/3m/6m/1y carry & roll"
+        REAL asw_mm_spread
+        REAL asw_true_spread
+        REAL asw_z_spread
+        REAL asw_proceeds_spread
     }
 
     bond_future_conventions {
